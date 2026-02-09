@@ -2,4 +2,4 @@
 set -Eeuo pipefail
 source "$(dirname "$0")/workloader_common.sh"
 OUT_CSV="${1:?output csv required}"
-retry_backoff "ipl-export" ipl-export --output-file "${OUT_CSV}"
+retry_backoff_to_file "ipl-export" "${OUT_CSV}" ipl-export --output-file "${OUT_CSV}"
