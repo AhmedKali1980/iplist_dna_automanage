@@ -152,24 +152,3 @@ retry_backoff() {
     (( attempt++ ))
   done
 }
-
-retry_backoff_to_file() {
-  local name="$1"
-  local output_file="$2"
-  shift 2
-  local tmp_file
-  tmp_file="$(mktemp)"
-
-  if retry_backoff "$name" "$@" >"${tmp_file}"; then
-    if [[ ! -s "${output_file}" && -s "${tmp_file}" ]]; then
-      mv "${tmp_file}" "${output_file}"
-    else
-      rm -f "${tmp_file}"
-    fi
-    return 0
-  fi
-
-  local rc=$?
-  rm -f "${tmp_file}"
-  return "${rc}"
-}
