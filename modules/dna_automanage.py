@@ -105,6 +105,12 @@ def main() -> int:
     export_wkld = run_dir / "export_wkld.m.csv"
     export_label = run_dir / "export_label.csv"
 
+    expected_exports = {
+        "export_iplists": export_ipl,
+        "export_managed_workloads": export_wkld,
+        "export_labels": export_label,
+    }
+
     for name, cmd in [
         ("export_iplists", [str(bin_dir / "workloader_ipl_export.sh"), str(export_ipl)]),
         ("export_managed_workloads", [str(bin_dir / "workloader_wkld_m_export.sh"), str(export_wkld)]),
@@ -113,6 +119,11 @@ def main() -> int:
         step = run_step(name, cmd, root, logger)
         steps.append(step)
         if step.rc != 0:
+            return 1
+
+        expected_file = expected_exports[name]
+        if not expected_file.exists() or expected_file.stat().st_size == 0:
+            logger.error("%s reported success but did not generate %s", name, expected_file)
             return 1
 
     labels_rows = csv_rows(export_label)
