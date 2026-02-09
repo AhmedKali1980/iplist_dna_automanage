@@ -10,8 +10,38 @@ if [[ ! -f "${CONF_FILE}" ]]; then
   exit 2
 fi
 
-# shellcheck disable=SC1090
-source "${CONF_FILE}"
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+load_conf() {
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" != *=* ]] && continue
+
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+
+    if [[ "$value" =~ ^".*"$ || "$value" =~ ^'.*'$ ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "WARNING: ignored invalid key '${key}' in ${CONF_FILE}" >&2
+      continue
+    fi
+
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done <"${CONF_FILE}"
+}
+
+load_conf
 
 : "${EXECUTABLE:?Missing EXECUTABLE in global.conf}"
 : "${EXECUTABLE_CONFIG_FILE:?Missing EXECUTABLE_CONFIG_FILE in global.conf}"
@@ -64,4 +94,25 @@ retry_backoff() {
     sleep $((wait + extra))
     ((attempt++))
   done
+}
+
+retry_backoff_to_file() {
+  local name="$1"
+  local output_file="$2"
+  shift 2
+  local tmp_file
+  tmp_file="$(mktemp)"
+
+  if retry_backoff "$name" "$@" >"${tmp_file}"; then
+    if [[ ! -s "${output_file}" && -s "${tmp_file}" ]]; then
+      mv "${tmp_file}" "${output_file}"
+    else
+      rm -f "${tmp_file}"
+    fi
+    return 0
+  fi
+
+  local rc=$?
+  rm -f "${tmp_file}"
+  return "${rc}"
 }

@@ -9,7 +9,7 @@ START_DATE="${4:?start date YYYY-mm-dd required}"
 END_DATE="${5:?end date YYYY-mm-dd required}"
 OUT_CSV="${6:?output csv required}"
 
-retry_backoff "traffic-out" traffic \
+retry_backoff_to_file "traffic-out" "${OUT_CSV}" traffic \
   --incl-src-file "${INCL_SRC_FILE}" \
   --excl-dst-file "${EXCL_DST_FILE}" \
   --excl-svc-file "${EXCL_SVC_FILE}" \
