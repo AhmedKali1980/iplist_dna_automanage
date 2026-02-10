@@ -286,7 +286,14 @@ def main() -> int:
         description = f"Last seen at : {today}"
         if iplist_name in existing:
             old_ips = set(filter(None, existing[iplist_name]["include"].split(";")))
-            update_rows.append({"href": existing[iplist_name]["href"], "description": description, "include": include})
+            update_rows.append(
+                {
+                    "href": existing[iplist_name]["href"],
+                    "description": description,
+                    "include": include,
+                    "fqdns": ";".join(fqdn_list),
+                }
+            )
             updated_for_report.append((short_name, fqdn_list, sorted(old_ips), sorted(ips)))
         else:
             create_rows.append({"name": iplist_name, "description": description, "include": include, "fqdns": ";".join(fqdn_list)})
@@ -298,7 +305,7 @@ def main() -> int:
         wr = csv.DictWriter(f, fieldnames=["name", "description", "include", "fqdns"])
         wr.writeheader(); wr.writerows(create_rows)
     with update_csv.open("w", encoding="utf-8", newline="") as f:
-        wr = csv.DictWriter(f, fieldnames=["href", "description", "include"])
+        wr = csv.DictWriter(f, fieldnames=["href", "description", "include", "fqdns"])
         wr.writeheader(); wr.writerows(update_rows)
 
     for name, path in [("import_new_iplists", create_csv), ("update_existing_iplists", update_csv)]:

@@ -28,7 +28,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 9. For each FQDN containing a configured availability-zone token (default: `eu-fr-paris`, `eu-fr-north`, `hk-hongkong`, `sg-singapore`), generate sibling FQDNs for the other zones, resolve them through DNS, and merge all discovered FQDNs/IPs into the same target IPList.
 10. Create:
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
-   - `update.iplist.existing.fqdns.csv` with `href,description,include`.
+   - `update.iplist.existing.fqdns.csv` with `href,description,include,fqdns`.
 11. Import create/update CSVs using `workloader_ipl_import.sh`.
 12. Build report sections:
    - Execution status with response code and timestamps.
