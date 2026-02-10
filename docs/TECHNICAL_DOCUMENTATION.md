@@ -24,7 +24,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 5. Export outbound flows into `flow-out-fqdn-<timestamp>.csv`.
 6. Purge flow rows where destination FQDN is empty, contains `.compute.`, or matches IP-style hostnames.
 7. Parse existing DNA_* IPLists only (`name starts with DNA_`).
-8. Build new FQDN/IP map from filtered flow.
+8. Build a new short-FQDN/IP map from filtered flow (short-FQDN = first label before the first `.`).
 9. Create:
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
    - `update.iplist.existing.fqdns.csv` with `href,description,include`.
@@ -38,6 +38,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 
 ## 4. Safety controls
 - Strict scope: only `DNA_` prefixed IPLists are read/updated.
+- Similar FQDNs sharing the same short-FQDN are grouped into one IPList (example: `ocs-compile.eur-fr-paris...` and `ocs-compile.eur-as-hk...` -> `DNA_ocs-compile-IPL`).
 - Label exclusions by prefix are configurable (`EXCLUDED_LABEL_PREFIXES`).
 - Flow query window is configurable (`NUMBER_OF_DAYS_AGO`).
 

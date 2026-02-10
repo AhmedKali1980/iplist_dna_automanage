@@ -71,6 +71,11 @@ def sanitize_name(fqdn: str) -> str:
     return f"DNA_{safe}-IPL"
 
 
+def short_fqdn(fqdn: str) -> str:
+    host = (fqdn or "").strip().split(".", 1)[0].strip().lower()
+    return host
+
+
 def parse_last_seen(desc: str) -> dt.date | None:
     m = re.search(r"Last seen at\s*:\s*(\d{4}-\d{2}-\d{2})", desc or "")
     if not m:
@@ -198,36 +203,40 @@ def main() -> int:
         name = choose(r, "name", "Name")
         if not name.startswith(dna_prefix):
             continue
-        fqdn = choose(r, "fqdns", "FQDNS", "fqdn")
-        existing[fqdn] = {
+        existing[name] = {
             "name": name,
             "description": choose(r, "description", "Description"),
             "include": choose(r, "include", "Include"),
-            "fqdns": fqdn,
+            "fqdns": choose(r, "fqdns", "FQDNS", "fqdn"),
             "href": choose(r, "href", "Href"),
         }
 
-    new_map: Dict[str, Set[str]] = defaultdict(set)
+    ips_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
+    fqdns_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
     for r in filtered_flow:
         vals = list(r.values())
         fqdn = choose(r, "Destination FQDN", default=vals[25].strip() if len(vals) > 25 else "")
         ip = choose(r, "Destination IP", default=vals[14].strip() if len(vals) > 14 else "")
-        if fqdn and ip:
-            new_map[fqdn].add(ip)
+        short_name = short_fqdn(fqdn)
+        if fqdn and ip and short_name:
+            ips_by_short_fqdn[short_name].add(ip)
+            fqdns_by_short_fqdn[short_name].add(fqdn)
 
     today = now.date().isoformat()
     create_rows, update_rows = [], []
     created_for_report, updated_for_report = [], []
-    for fqdn, ips in sorted(new_map.items()):
+    for short_name, ips in sorted(ips_by_short_fqdn.items()):
+        fqdn_list = sorted(fqdns_by_short_fqdn[short_name])
+        iplist_name = sanitize_name(short_name)
         include = ";".join(sorted(ips))
         description = f"Last seen at : {today}"
-        if fqdn in existing:
-            old_ips = set(filter(None, existing[fqdn]["include"].split(";")))
-            update_rows.append({"href": existing[fqdn]["href"], "description": description, "include": include})
-            updated_for_report.append((fqdn, sorted(old_ips), sorted(ips)))
+        if iplist_name in existing:
+            old_ips = set(filter(None, existing[iplist_name]["include"].split(";")))
+            update_rows.append({"href": existing[iplist_name]["href"], "description": description, "include": include})
+            updated_for_report.append((short_name, fqdn_list, sorted(old_ips), sorted(ips)))
         else:
-            create_rows.append({"name": sanitize_name(fqdn), "description": description, "include": include, "fqdns": fqdn})
-            created_for_report.append((fqdn, sorted(ips)))
+            create_rows.append({"name": iplist_name, "description": description, "include": include, "fqdns": ";".join(fqdn_list)})
+            created_for_report.append((short_name, fqdn_list, sorted(ips)))
 
     create_csv = run_dir / "new.iplist.new.fqdns.csv"
     update_csv = run_dir / "update.iplist.existing.fqdns.csv"
@@ -262,13 +271,13 @@ def main() -> int:
         for s in steps:
             f.write(f"- {s.name}: rc={s.rc}; started={s.started_at}; ended={s.ended_at}\n")
         f.write("\nNew IPLists created:\n")
-        for fqdn, ips in created_for_report:
-            f.write(f"  * {fqdn} -> {','.join(ips)}\n")
+        for short_name, fqdns, ips in created_for_report:
+            f.write(f"  * {short_name} ({';'.join(fqdns)}) -> {','.join(ips)}\n")
         f.write("\nUpdated IPLists:\n")
-        for fqdn, old_ips, new_ips in updated_for_report:
+        for short_name, fqdns, old_ips, new_ips in updated_for_report:
             add = sorted(set(new_ips) - set(old_ips))
             rem = sorted(set(old_ips) - set(new_ips))
-            f.write(f"  * {fqdn}\n")
+            f.write(f"  * {short_name} ({';'.join(fqdns)})\n")
             f.write(f"      + added: {','.join(add) if add else '-'}\n")
             f.write(f"      - removed: {','.join(rem) if rem else '-'}\n")
 
