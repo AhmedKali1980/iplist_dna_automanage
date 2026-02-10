@@ -145,8 +145,12 @@ def main() -> int:
 
     href_labels_app = sorted({choose(r, "href", "Href") for r in labels_rows if choose(r, "key", "Key") == "app" and choose(r, "href", "Href")})
 
-    (run_dir / "href_labels.wkld.m.csv").write_text("href\n" + "\n".join(href_labels_wkld) + "\n", encoding="utf-8")
-    (run_dir / "href_labels.app.csv").write_text("href\n" + "\n".join(href_labels_app) + "\n", encoding="utf-8")
+    (run_dir / "href_labels.wkld.m.csv").write_text(
+        "\n".join(href_labels_wkld) + ("\n" if href_labels_wkld else ""), encoding="utf-8"
+    )
+    (run_dir / "href_labels.app.csv").write_text(
+        "\n".join(href_labels_app) + ("\n" if href_labels_app else ""), encoding="utf-8"
+    )
     (run_dir / "service.exlude.csv").write_text("PortNumber,NumericIANA\n0,1\n0,58\n", encoding="utf-8")
 
     days = int(conf.get("NUMBER_OF_DAYS_AGO", "7"))
