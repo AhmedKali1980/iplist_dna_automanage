@@ -23,6 +23,12 @@ from typing import Dict, List, Set, Tuple
 from email_utils import parse_recipients, send_carto_notification
 
 
+IP_STYLE_FQDN_PATTERN = re.compile(
+    r"^(?:ip-)?(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:-(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(?:\..+)?$",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class StepResult:
     name: str
@@ -81,6 +87,10 @@ def parse_last_seen(desc: str) -> dt.date | None:
     if not m:
         return None
     return dt.date.fromisoformat(m.group(1))
+
+
+def is_ip_style_fqdn(fqdn: str) -> bool:
+    return bool(IP_STYLE_FQDN_PATTERN.match((fqdn or "").strip()))
 
 
 def main() -> int:
@@ -183,11 +193,10 @@ def main() -> int:
 
     flow_rows = csv_rows(flow_file)
     filtered_flow: List[Dict[str, str]] = []
-    ip_pattern = re.compile(r"^(?:IP-)?\d{1,3}(?:-\d{1,3}){3}(?:\..*)?$")
     for r in flow_rows:
         vals = list(r.values())
         fqdn = choose(r, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
-        if not fqdn or ".compute." in fqdn or ip_pattern.match(fqdn):
+        if not fqdn or ".compute." in fqdn or is_ip_style_fqdn(fqdn):
             continue
         filtered_flow.append(r)
 
