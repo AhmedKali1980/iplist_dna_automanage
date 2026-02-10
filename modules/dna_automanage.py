@@ -14,6 +14,7 @@ import html
 import logging
 import os
 import re
+import socket
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -81,6 +82,42 @@ def parse_last_seen(desc: str) -> dt.date | None:
     if not m:
         return None
     return dt.date.fromisoformat(m.group(1))
+
+
+def parse_list(conf: Dict[str, str], key: str, default: str = "") -> List[str]:
+    raw = conf.get(key, default)
+    return [v.strip() for v in raw.split(";") if v.strip()]
+
+
+def expand_fqdn_by_az(fqdn: str, az_tokens: List[str]) -> Set[str]:
+    fqdn_l = (fqdn or "").strip().lower()
+    if not fqdn_l:
+        return set()
+
+    for token in az_tokens:
+        token_l = token.lower()
+        if token_l in fqdn_l:
+            return {fqdn_l.replace(token_l, az.lower()) for az in az_tokens}
+
+    return {fqdn_l}
+
+
+def resolve_fqdn_ips(fqdn: str, logger: logging.Logger) -> Set[str]:
+    try:
+        infos = socket.getaddrinfo(fqdn, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        logger.debug("DNS resolution failed for %s", fqdn)
+        return set()
+    except OSError as exc:
+        logger.warning("DNS resolution error for %s: %s", fqdn, exc)
+        return set()
+
+    resolved = set()
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr:
+            resolved.add(sockaddr[0])
+    return resolved
 
 
 def main() -> int:
@@ -211,6 +248,10 @@ def main() -> int:
             "href": choose(r, "href", "Href"),
         }
 
+    az_tokens = parse_list(conf, "AVAILABILITY_ZONES", "eu-fr-paris;eu-fr-north;hk-hongkong;sg-singapore")
+    dns_timeout = float(conf.get("DNS_LOOKUP_TIMEOUT_SEC", "2"))
+    socket.setdefaulttimeout(dns_timeout)
+
     ips_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
     fqdns_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
     for r in filtered_flow:
@@ -220,7 +261,15 @@ def main() -> int:
         short_name = short_fqdn(fqdn)
         if fqdn and ip and short_name:
             ips_by_short_fqdn[short_name].add(ip)
-            fqdns_by_short_fqdn[short_name].add(fqdn)
+            fqdns_by_short_fqdn[short_name].add(fqdn.lower())
+
+            for candidate_fqdn in sorted(expand_fqdn_by_az(fqdn, az_tokens)):
+                if candidate_fqdn == fqdn.lower():
+                    continue
+                candidate_ips = resolve_fqdn_ips(candidate_fqdn, logger)
+                if candidate_ips:
+                    fqdns_by_short_fqdn[short_name].add(candidate_fqdn)
+                    ips_by_short_fqdn[short_name].update(candidate_ips)
 
     today = now.date().isoformat()
     create_rows, update_rows = [], []
