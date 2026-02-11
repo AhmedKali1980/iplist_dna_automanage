@@ -16,10 +16,12 @@ import os
 import re
 import socket
 import subprocess
+import xml.sax.saxutils as saxutils
+import zipfile
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 from email_utils import parse_recipients, send_carto_notification
 
@@ -126,6 +128,154 @@ def resolve_fqdn_ips(fqdn: str, logger: logging.Logger) -> Set[str]:
     return resolved
 
 
+def is_ip_style_fqdn(value: str) -> bool:
+    return bool(IP_STYLE_FQDN_PATTERN.match((value or "").strip()))
+
+
+def html_escape_join(values: List[str], sep: str = "<br/>") -> str:
+    return sep.join(html.escape(v) for v in values) if values else "-"
+
+
+def fmt_delta(old_items: List[str], new_items: List[str]) -> str:
+    old_set, new_set = set(old_items), set(new_items)
+    unchanged = sorted(old_set & new_set)
+    added = sorted(new_set - old_set)
+    removed = sorted(old_set - new_set)
+    chunks = [html.escape(v) for v in unchanged]
+    chunks.extend(f"<span style='color:#008000;font-weight:bold'>(+) {html.escape(v)}</span>" for v in added)
+    chunks.extend(f"<span style='color:#c00000;font-weight:bold'>(-) {html.escape(v)}</span>" for v in removed)
+    return "<br/>".join(chunks) if chunks else "-"
+
+
+def build_table_html(title: str, headers: List[str], rows: List[List[str]]) -> str:
+    table_style = "border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:13px;"
+    th_style = "border:1px solid #bfbfbf;background:#d9d9d9;font-weight:bold;padding:6px;text-align:left;"
+    td_style = "border:1px solid #d0d0d0;padding:6px;vertical-align:top;"
+
+    thead = "".join(f"<th style='{th_style}'>{html.escape(h)}</th>" for h in headers)
+    body_rows = []
+    if rows:
+        for row in rows:
+            body_rows.append("<tr>" + "".join(f"<td style='{td_style}'>{cell}</td>" for cell in row) + "</tr>")
+    else:
+        body_rows.append(f"<tr><td style='{td_style}' colspan='{len(headers)}'>No data</td></tr>")
+
+    return (
+        f"<h3 style='font-family:Arial,sans-serif'>{html.escape(title)}</h3>"
+        f"<table style='{table_style}'><thead><tr>{thead}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+    )
+
+
+def excel_column_name(index: int) -> str:
+    name = ""
+    n = index + 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
+def excel_inline_cell(text: str, style: int = 0) -> str:
+    escaped = saxutils.escape(text or "")
+    return f"<c t='inlineStr' s='{style}'><is><t xml:space='preserve'>{escaped}</t></is></c>"
+
+
+def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
+    headers = ["IPList name", "fqdns", "IP Adresses", "Last seen at", "href"]
+    keys = ["name", "fqdns", "include", "last_seen", "href"]
+
+    max_chars = [len(h) for h in headers]
+    row_xml = []
+
+    header_cells = "".join(excel_inline_cell(h, style=1) for h in headers)
+    row_xml.append(f"<row r='1'>{header_cells}</row>")
+
+    for row_idx, item in enumerate(rows, start=2):
+        values = [
+            item.get("name", ""),
+            item.get("fqdns", "").replace(";", "\n"),
+            item.get("include", "").replace(";", "\n"),
+            item.get("last_seen", ""),
+            item.get("href", ""),
+        ]
+        for i, v in enumerate(values):
+            max_chars[i] = max(max_chars[i], max((len(x) for x in (v or "").splitlines()), default=0))
+        cells = "".join(excel_inline_cell(v, style=0 if i not in (1, 2) else 2) for i, v in enumerate(values))
+        row_xml.append(f"<row r='{row_idx}'>{cells}</row>")
+
+    max_width = 28.0  # ~200px
+    cols_xml = []
+    for i, width_chars in enumerate(max_chars, start=1):
+        width = min(max(float(width_chars) + 2.0, 12.0), max_width)
+        cols_xml.append(f"<col min='{i}' max='{i}' width='{width:.2f}' customWidth='1'/>")
+
+    sheet_xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>
+  <cols>{''.join(cols_xml)}</cols>
+  <sheetData>{''.join(row_xml)}</sheetData>
+</worksheet>
+"""
+
+    styles_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<styleSheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>
+  <fonts count='2'>
+    <font><name val='Arial'/><sz val='11'/></font>
+    <font><b/><name val='Arial'/><sz val='11'/></font>
+  </fonts>
+  <fills count='3'>
+    <fill><patternFill patternType='none'/></fill>
+    <fill><patternFill patternType='gray125'/></fill>
+    <fill><patternFill patternType='solid'><fgColor rgb='FFD9E1F2'/><bgColor indexed='64'/></patternFill></fill>
+  </fills>
+  <borders count='1'><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count='1'><xf numFmtId='0' fontId='0' fillId='0' borderId='0'/></cellStyleXfs>
+  <cellXfs count='3'>
+    <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0' applyAlignment='1'><alignment vertical='top'/></xf>
+    <xf numFmtId='0' fontId='1' fillId='2' borderId='0' xfId='0' applyFont='1' applyFill='1' applyAlignment='1'><alignment vertical='center'/></xf>
+    <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0' applyAlignment='1'><alignment wrapText='1' vertical='top'/></xf>
+  </cellXfs>
+  <cellStyles count='1'><cellStyle name='Normal' xfId='0' builtinId='0'/></cellStyles>
+</styleSheet>
+"""
+
+    workbook_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+  <sheets><sheet name='DNA_IPLists' sheetId='1' r:id='rId1'/></sheets>
+</workbook>
+"""
+
+    rels_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>
+  <Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='xl/workbook.xml'/>
+</Relationships>
+"""
+
+    workbook_rels_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>
+  <Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet1.xml'/>
+  <Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles' Target='styles.xml'/>
+</Relationships>
+"""
+
+    content_types_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>
+  <Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>
+  <Default Extension='xml' ContentType='application/xml'/>
+  <Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/>
+  <Override PartName='/xl/worksheets/sheet1.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'/>
+  <Override PartName='/xl/styles.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml'/>
+</Types>
+"""
+
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types_xml)
+        zf.writestr("_rels/.rels", rels_xml)
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        zf.writestr("xl/styles.xml", styles_xml)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -139,10 +289,11 @@ def main() -> int:
     run_dir = (root / conf.get("EXPORT_ROOT", "./RUNS") / now.strftime(conf.get("DATE_FMT", "%Y%m%d-%H%M%S"))).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    execution_log = run_dir / "execution.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler(run_dir / "execution.log", encoding="utf-8"), logging.StreamHandler()],
+        handlers=[logging.FileHandler(execution_log, encoding="utf-8"), logging.StreamHandler()],
     )
     logger = logging.getLogger("dna_automanage")
 
@@ -279,13 +430,16 @@ def main() -> int:
     today = now.date().isoformat()
     create_rows, update_rows = [], []
     created_for_report, updated_for_report = [], []
+    current_state = {k: dict(v) for k, v in existing.items()}
+
     for short_name, ips in sorted(ips_by_short_fqdn.items()):
         fqdn_list = sorted(fqdns_by_short_fqdn[short_name])
         iplist_name = sanitize_name(short_name)
         include = ";".join(sorted(ips))
         description = f"Last seen at : {today}"
         if iplist_name in existing:
-            old_ips = set(filter(None, existing[iplist_name]["include"].split(";")))
+            old_ips = sorted(set(filter(None, existing[iplist_name]["include"].split(";"))))
+            old_fqdns = sorted(set(filter(None, existing[iplist_name]["fqdns"].split(";"))))
             update_rows.append(
                 {
                     "href": existing[iplist_name]["href"],
@@ -294,19 +448,37 @@ def main() -> int:
                     "fqdns": ";".join(fqdn_list),
                 }
             )
-            updated_for_report.append((short_name, fqdn_list, sorted(old_ips), sorted(ips)))
+            updated_for_report.append(
+                {
+                    "name": iplist_name,
+                    "old_fqdns": old_fqdns,
+                    "new_fqdns": fqdn_list,
+                    "old_ips": old_ips,
+                    "new_ips": sorted(ips),
+                }
+            )
         else:
             create_rows.append({"name": iplist_name, "description": description, "include": include, "fqdns": ";".join(fqdn_list)})
-            created_for_report.append((short_name, fqdn_list, sorted(ips)))
+            created_for_report.append({"name": iplist_name, "fqdns": fqdn_list, "ips": sorted(ips)})
+
+        current_state[iplist_name] = {
+            "name": iplist_name,
+            "description": description,
+            "include": include,
+            "fqdns": ";".join(fqdn_list),
+            "href": existing.get(iplist_name, {}).get("href", ""),
+        }
 
     create_csv = run_dir / "new.iplist.new.fqdns.csv"
     update_csv = run_dir / "update.iplist.existing.fqdns.csv"
     with create_csv.open("w", encoding="utf-8", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=["name", "description", "include", "fqdns"])
-        wr.writeheader(); wr.writerows(create_rows)
+        wr.writeheader()
+        wr.writerows(create_rows)
     with update_csv.open("w", encoding="utf-8", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=["href", "description", "include", "fqdns"])
-        wr.writeheader(); wr.writerows(update_rows)
+        wr.writeheader()
+        wr.writerows(update_rows)
 
     for name, path in [("import_new_iplists", create_csv), ("update_existing_iplists", update_csv)]:
         if sum(1 for _ in path.open("r", encoding="utf-8")) > 1:
@@ -314,53 +486,106 @@ def main() -> int:
 
     stale_threshold = int(conf.get("STALE_LAST_SEEN_DAYS", "21"))
     stale = []
-    for v in existing.values():
+    for v in current_state.values():
         d = parse_last_seen(v["description"])
         if d and (now.date() - d).days > stale_threshold:
-            stale.append((v["name"], v["fqdns"], v["description"], v["href"]))
+            stale.append({"name": v["name"], "fqdns": v["fqdns"], "include": v["include"], "last_seen": d.isoformat(), "href": v["href"]})
 
-    ip_to_lists: Dict[str, Set[str]] = defaultdict(set)
-    for v in existing.values():
-        for ip in filter(None, v["include"].split(";")):
-            ip_to_lists[ip].add(v["name"])
-    duplicate_ips = {ip: sorted(names) for ip, names in ip_to_lists.items() if len(names) > 1}
-
-    report = run_dir / "report.txt"
-    with report.open("w", encoding="utf-8") as f:
-        f.write("DNA IPList Auto-Manage Report\n\n")
+    section1_log = run_dir / "execution_section1.log"
+    with section1_log.open("w", encoding="utf-8") as f:
         f.write("Section 1 - Execution log\n")
         for s in steps:
             f.write(f"- {s.name}: rc={s.rc}; started={s.started_at}; ended={s.ended_at}\n")
-        f.write("\nNew IPLists created:\n")
-        for short_name, fqdns, ips in created_for_report:
-            f.write(f"  * {short_name} ({';'.join(fqdns)}) -> {','.join(ips)}\n")
-        f.write("\nUpdated IPLists:\n")
-        for short_name, fqdns, old_ips, new_ips in updated_for_report:
-            add = sorted(set(new_ips) - set(old_ips))
-            rem = sorted(set(old_ips) - set(new_ips))
-            f.write(f"  * {short_name} ({';'.join(fqdns)})\n")
-            f.write(f"      + added: {','.join(add) if add else '-'}\n")
-            f.write(f"      - removed: {','.join(rem) if rem else '-'}\n")
 
-        f.write("\nSection 2 - Deletion candidates (>3 weeks)\n")
-        for name, fqdn, desc, href in stale:
-            f.write(f"  * {name} | {fqdn} | {desc} | {href}\n")
+    all_dna_rows = []
+    for v in sorted(current_state.values(), key=lambda x: x["name"]):
+        d = parse_last_seen(v["description"])
+        all_dna_rows.append(
+            {
+                "name": v["name"],
+                "fqdns": v["fqdns"],
+                "include": v["include"],
+                "last_seen": d.isoformat() if d else "",
+                "href": v.get("href", ""),
+            }
+        )
 
-        f.write("\nSection 3 - IP addresses present in multiple DNA IPLists\n")
-        for ip, names in duplicate_ips.items():
-            f.write(f"  * {ip}: {','.join(names)}\n")
+    excel_path = run_dir / "DNA_IPLists_After_Run.xlsx"
+    build_excel(all_dna_rows, excel_path)
+
+    created_rows_html = [[html.escape(i["name"]), html_escape_join(i["fqdns"]), html_escape_join(i["ips"])] for i in created_for_report]
+    updated_rows_html = [
+        [
+            html.escape(i["name"]),
+            fmt_delta(i["old_fqdns"], i["new_fqdns"]),
+            fmt_delta(i["old_ips"], i["new_ips"]),
+        ]
+        for i in updated_for_report
+    ]
+    stale_rows_html = [
+        [
+            html.escape(i["name"]),
+            html_escape_join(sorted(filter(None, i["fqdns"].split(";")))),
+            html_escape_join(sorted(filter(None, i["include"].split(";")))),
+            html.escape(i["last_seen"]),
+        ]
+        for i in stale
+    ]
+
+    script_name = Path(__file__).name
+    vm_hostname = socket.gethostname()
+
+    body_html = (
+        "<div style='font-family:Arial,sans-serif'>"
+        + build_table_html(
+            "Tableau 1 : New FQDN IPList(s) created",
+            ["IPList name", "fqdns", "IP Adresses"],
+            created_rows_html,
+        )
+        + "<br/>"
+        + build_table_html(
+            "Tableau 2 : Existing FQDN IPList(s) updated",
+            ["IPList name", "fqdns", "IP Adresses"],
+            updated_rows_html,
+        )
+        + "<br/>"
+        + build_table_html(
+            "Tableau 3 : FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks)",
+            ["IPList name", "fqdns", "IP Adresses", "Last seen at"],
+            stale_rows_html,
+        )
+        + f"<br/><p style='font-family:Arial,sans-serif'><strong>Sent by FQDN IPList Batch<br/>{html.escape(script_name)} / running from {html.escape(vm_hostname)}</strong></p>"
+        + "</div>"
+    )
+
+    body_text_lines = [
+        "New FQDN IPList(s) created:",
+        *(f"- {i['name']} | fqdns={';'.join(i['fqdns'])} | ips={';'.join(i['ips'])}" for i in created_for_report),
+        "",
+        "Existing FQDN IPList(s) updated:",
+        *(
+            f"- {i['name']} | fqdns +( {','.join(sorted(set(i['new_fqdns'])-set(i['old_fqdns'])))} ) -( {','.join(sorted(set(i['old_fqdns'])-set(i['new_fqdns'])))} )"
+            f" | ips +( {','.join(sorted(set(i['new_ips'])-set(i['old_ips'])))} ) -( {','.join(sorted(set(i['old_ips'])-set(i['new_ips'])))} )"
+            for i in updated_for_report
+        ),
+        "",
+        "FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks):",
+        *(f"- {i['name']} | {i['fqdns']} | {i['include']} | {i['last_seen']}" for i in stale),
+        "",
+        "Sent by FQDN IPList Batch",
+        f"{script_name} / running from {vm_hostname}",
+    ]
+    body_text = "\n".join(body_text_lines)
 
     recipients = parse_recipients(conf.get("MAIL_TO", ""))
     if recipients and conf.get("SMTP_SERVER", "").strip():
-        body_text = report.read_text(encoding="utf-8")
-        body_html = f"<pre>{html.escape(body_text)}</pre>"
         send_carto_notification(
             conf=conf,
             recipients=recipients,
             subject=f"DNA IPList Auto-Manage report - {now.strftime('%Y-%m-%d %H:%M:%S')}",
             body_text=body_text,
             body_html=body_html,
-            attachment_path=report,
+            attachment_paths=[section1_log, execution_log, excel_path],
             logger=logger,
         )
     else:
