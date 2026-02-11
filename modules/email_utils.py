@@ -2,7 +2,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 
 def is_truthy(value: str) -> bool:
@@ -70,7 +70,7 @@ def send_carto_notification(
     subject: str,
     body_text: str,
     body_html: str,
-    attachment_path: Path,
+    attachment_paths: Sequence[Path],
     logger,
 ) -> None:
     recipients = [r for r in recipients if r]
@@ -94,13 +94,24 @@ def send_carto_notification(
     if body_html:
         msg.add_alternative(body_html, subtype="html")
 
-    attachment_path = Path(attachment_path)
-    if attachment_path.exists():
+    for attachment_path in attachment_paths:
+        path = Path(attachment_path)
+        if not path.exists():
+            continue
+
+        suffix = path.suffix.lower()
+        maintype, subtype = "application", "octet-stream"
+        if suffix in {".log", ".txt", ".csv"}:
+            maintype, subtype = "text", "plain"
+        elif suffix == ".xlsx":
+            maintype = "application"
+            subtype = "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
         msg.add_attachment(
-            attachment_path.read_bytes(),
-            maintype="text",
-            subtype="plain",
-            filename=attachment_path.name,
+            path.read_bytes(),
+            maintype=maintype,
+            subtype=subtype,
+            filename=path.name,
         )
 
     try:
