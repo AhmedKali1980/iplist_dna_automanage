@@ -182,7 +182,6 @@ def excel_inline_cell(text: str, style: int = 0) -> str:
 
 def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
     headers = ["IPList name", "fqdns", "IP Adresses", "Last seen at", "href"]
-    keys = ["name", "fqdns", "include", "last_seen", "href"]
 
     max_chars = [len(h) for h in headers]
     row_xml = []
@@ -193,21 +192,21 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
     for row_idx, item in enumerate(rows, start=2):
         values = [
             item.get("name", ""),
-            item.get("fqdns", "").replace(";", "\n"),
-            item.get("include", "").replace(";", "\n"),
+            item.get("fqdns", "").replace(";", "; "),
+            item.get("include", "").replace(";", "; "),
             item.get("last_seen", ""),
             item.get("href", ""),
         ]
         for i, v in enumerate(values):
-            max_chars[i] = max(max_chars[i], max((len(x) for x in (v or "").splitlines()), default=0))
-        cells = "".join(excel_inline_cell(v, style=0 if i not in (1, 2) else 2) for i, v in enumerate(values))
+            max_chars[i] = max(max_chars[i], len(v or ""))
+        cells = "".join(excel_inline_cell(v, style=0) for i, v in enumerate(values))
         row_xml.append(f"<row r='{row_idx}'>{cells}</row>")
 
-    max_width = 28.0  # ~200px
+    max_width = 100.0
     cols_xml = []
     for i, width_chars in enumerate(max_chars, start=1):
         width = min(max(float(width_chars) + 2.0, 12.0), max_width)
-        cols_xml.append(f"<col min='{i}' max='{i}' width='{width:.2f}' customWidth='1'/>")
+        cols_xml.append(f"<col min='{i}' max='{i}' width='{width:.2f}' customWidth='1' bestFit='1'/>")
 
     sheet_xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>
@@ -229,10 +228,9 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
   </fills>
   <borders count='1'><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count='1'><xf numFmtId='0' fontId='0' fillId='0' borderId='0'/></cellStyleXfs>
-  <cellXfs count='3'>
+  <cellXfs count='2'>
     <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0' applyAlignment='1'><alignment vertical='top'/></xf>
     <xf numFmtId='0' fontId='1' fillId='2' borderId='0' xfId='0' applyFont='1' applyFill='1' applyAlignment='1'><alignment vertical='center'/></xf>
-    <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0' applyAlignment='1'><alignment wrapText='1' vertical='top'/></xf>
   </cellXfs>
   <cellStyles count='1'><cellStyle name='Normal' xfId='0' builtinId='0'/></cellStyles>
 </styleSheet>
@@ -448,15 +446,16 @@ def main() -> int:
                     "fqdns": ";".join(fqdn_list),
                 }
             )
-            updated_for_report.append(
-                {
-                    "name": iplist_name,
-                    "old_fqdns": old_fqdns,
-                    "new_fqdns": fqdn_list,
-                    "old_ips": old_ips,
-                    "new_ips": sorted(ips),
-                }
-            )
+            if set(old_fqdns) != set(fqdn_list) or set(old_ips) != set(ips):
+                updated_for_report.append(
+                    {
+                        "name": iplist_name,
+                        "old_fqdns": old_fqdns,
+                        "new_fqdns": fqdn_list,
+                        "old_ips": old_ips,
+                        "new_ips": sorted(ips),
+                    }
+                )
         else:
             create_rows.append({"name": iplist_name, "description": description, "include": include, "fqdns": ";".join(fqdn_list)})
             created_for_report.append({"name": iplist_name, "fqdns": fqdn_list, "ips": sorted(ips)})
@@ -491,11 +490,14 @@ def main() -> int:
         if d and (now.date() - d).days > stale_threshold:
             stale.append({"name": v["name"], "fqdns": v["fqdns"], "include": v["include"], "last_seen": d.isoformat(), "href": v["href"]})
 
-    section1_log = run_dir / "execution_section1.log"
-    with section1_log.open("w", encoding="utf-8") as f:
-        f.write("Section 1 - Execution log\n")
+    report_log = run_dir / "execution_report.log"
+    with report_log.open("w", encoding="utf-8") as f:
+        f.write("Section 1 - Execution summary\n")
         for s in steps:
             f.write(f"- {s.name}: rc={s.rc}; started={s.started_at}; ended={s.ended_at}\n")
+        f.write("\nSection 2 - Detailed execution log\n")
+        if execution_log.exists():
+            f.write(execution_log.read_text(encoding="utf-8"))
 
     all_dna_rows = []
     for v in sorted(current_state.values(), key=lambda x: x["name"]):
@@ -538,19 +540,19 @@ def main() -> int:
     body_html = (
         "<div style='font-family:Arial,sans-serif'>"
         + build_table_html(
-            "Tableau 1 : New FQDN IPList(s) created",
+            "Table 1 : New FQDN IPList(s) created",
             ["IPList name", "fqdns", "IP Adresses"],
             created_rows_html,
         )
         + "<br/>"
         + build_table_html(
-            "Tableau 2 : Existing FQDN IPList(s) updated",
+            "Table 2 : Existing FQDN IPList(s) updated",
             ["IPList name", "fqdns", "IP Adresses"],
             updated_rows_html,
         )
         + "<br/>"
         + build_table_html(
-            "Tableau 3 : FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks)",
+            "Table 3 : FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks)",
             ["IPList name", "fqdns", "IP Adresses", "Last seen at"],
             stale_rows_html,
         )
@@ -585,7 +587,7 @@ def main() -> int:
             subject=f"DNA IPList Auto-Manage report - {now.strftime('%Y-%m-%d %H:%M:%S')}",
             body_text=body_text,
             body_html=body_html,
-            attachment_paths=[section1_log, execution_log, excel_path],
+            attachment_paths=[report_log, excel_path],
             logger=logger,
         )
     else:
