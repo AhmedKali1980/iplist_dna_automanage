@@ -380,7 +380,7 @@ def main() -> int:
     for r in flow_rows:
         vals = list(r.values())
         fqdn = choose(r, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
-        if not fqdn or ".compute." in fqdn or is_ip_style_fqdn(fqdn):
+        if not fqdn or ".compute." in fqdn or IP_STYLE_FQDN_PATTERN.match(fqdn.strip()):
             continue
         filtered_flow.append(r)
 
