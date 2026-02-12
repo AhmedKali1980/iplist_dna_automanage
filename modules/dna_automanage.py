@@ -92,6 +92,26 @@ def short_fqdn(fqdn: str) -> str:
     return host
 
 
+def group_key_for_fqdn(fqdn: str) -> str:
+    fqdn_l = (fqdn or "").strip().lower().strip(".")
+    if not fqdn_l:
+        return ""
+
+    m = re.match(r"^[^.]+\.ece\.sgmonitoring\.(dev|prd)\..+$", fqdn_l)
+    if m:
+        return f"sgmonitoring.{m.group(1)}"
+
+    m = re.match(r"^kfk(?:dev|prd)-\d+-fed\.fed\.kafka\.(dev|prd)\..+$", fqdn_l)
+    if m:
+        return f"kafka.{m.group(1)}"
+
+    labels = fqdn_l.split(".")
+    if len(labels) >= 2 and labels[0] == "api":
+        return f"{labels[0]}.{labels[1]}"
+
+    return short_fqdn(fqdn_l)
+
+
 def parse_last_seen(desc: str) -> dt.date | None:
     m = re.search(r"Last seen at\s*:\s*(\d{4}-\d{2}-\d{2})", desc or "")
     if not m:
@@ -539,33 +559,33 @@ def main() -> int:
     dns_timeout = float(conf.get("DNS_LOOKUP_TIMEOUT_SEC", "2"))
     socket.setdefaulttimeout(dns_timeout)
 
-    ips_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
-    fqdns_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
+    ips_by_group_key: Dict[str, Set[str]] = defaultdict(set)
+    fqdns_by_group_key: Dict[str, Set[str]] = defaultdict(set)
     for r in filtered_flow:
         vals = list(r.values())
         fqdn = choose(r, "Destination FQDN", default=vals[25].strip() if len(vals) > 25 else "")
         ip = choose(r, "Destination IP", default=vals[14].strip() if len(vals) > 14 else "")
-        short_name = short_fqdn(fqdn)
-        if fqdn and ip and short_name:
-            ips_by_short_fqdn[short_name].add(ip)
-            fqdns_by_short_fqdn[short_name].add(fqdn.lower())
+        group_key = group_key_for_fqdn(fqdn)
+        if fqdn and ip and group_key:
+            ips_by_group_key[group_key].add(ip)
+            fqdns_by_group_key[group_key].add(fqdn.lower())
 
             for candidate_fqdn in sorted(expand_fqdn_by_az(fqdn, az_tokens)):
                 if candidate_fqdn == fqdn.lower():
                     continue
                 candidate_ips = resolve_fqdn_ips(candidate_fqdn, logger)
                 if candidate_ips:
-                    fqdns_by_short_fqdn[short_name].add(candidate_fqdn)
-                    ips_by_short_fqdn[short_name].update(candidate_ips)
+                    fqdns_by_group_key[group_key].add(candidate_fqdn)
+                    ips_by_group_key[group_key].update(candidate_ips)
 
     today = now.date().isoformat()
     create_rows, update_rows = [], []
     created_for_report, updated_for_report = [], []
     current_state = {k: dict(v) for k, v in existing.items()}
 
-    for short_name, ips in sorted(ips_by_short_fqdn.items()):
-        fqdn_list = sorted(fqdns_by_short_fqdn[short_name])
-        iplist_name = sanitize_name(short_name)
+    for group_key, ips in sorted(ips_by_group_key.items()):
+        fqdn_list = sorted(fqdns_by_group_key[group_key])
+        iplist_name = sanitize_name(group_key)
         include = ";".join(sorted(ips))
         description = f"Last seen at : {today}"
         if iplist_name in existing:
