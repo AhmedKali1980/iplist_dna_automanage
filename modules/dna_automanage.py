@@ -68,6 +68,13 @@ def csv_rows(path: Path) -> List[Dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def write_csv(path: Path, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=fieldnames)
+        wr.writeheader()
+        wr.writerows(rows)
+
+
 def choose(row: Dict[str, str], *keys: str, default: str = "") -> str:
     for k in keys:
         if k in row and row[k] is not None:
@@ -130,6 +137,17 @@ def resolve_fqdn_ips(fqdn: str, logger: logging.Logger) -> Set[str]:
 
 def is_ip_style_fqdn(value: str) -> bool:
     return bool(IP_STYLE_FQDN_PATTERN.match((value or "").strip()))
+
+
+def filter_flow_rows(flow_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    filtered_flow: List[Dict[str, str]] = []
+    for row in flow_rows:
+        vals = list(row.values())
+        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
+        if not fqdn or ".compute." in fqdn or is_ip_style_fqdn(fqdn):
+            continue
+        filtered_flow.append(row)
+    return filtered_flow
 
 
 def html_escape_join(values: List[str], sep: str = "<br/>") -> str:
@@ -374,18 +392,133 @@ def main() -> int:
         return 1
 
     flow_rows = csv_rows(flow_file)
-    filtered_flow: List[Dict[str, str]] = []
-    for r in flow_rows:
-        vals = list(r.values())
-        fqdn = choose(r, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
-        if not fqdn or ".compute." in fqdn or IP_STYLE_FQDN_PATTERN.match(fqdn.strip()):
-            continue
-        filtered_flow.append(r)
+    if flow_rows:
+        filtered_flow = filter_flow_rows(flow_rows)
+        write_csv(run_dir / flow_file.name, list(flow_rows[0].keys()), filtered_flow)
+    else:
+        filtered_flow = []
 
-    with (run_dir / flow_file.name).open("w", encoding="utf-8", newline="") as f:
-        wr = csv.DictWriter(f, fieldnames=flow_rows[0].keys())
-        wr.writeheader()
-        wr.writerows(filtered_flow)
+    tmp_ip_values = sorted(
+        {
+            choose(r, "Destination IP", "destination_ip", default=(list(r.values())[14].strip() if len(list(r.values())) > 14 else ""))
+            for r in filtered_flow
+        }
+    )
+    tmp_ip_values = [ip for ip in tmp_ip_values if ip]
+
+    if tmp_ip_values:
+        tmp_suffix = now.strftime("%Y%m%d-%H%M%S")
+        tmp_iplist_name = f"_tmp_ipl.ip.with.fqdn.to.exclude_{tmp_suffix}-IPL"
+        tmp_iplist_description = (
+            "DO NOT USE! Temporary IPList to enhance FQDN detection. Will be automatically deleted after job execution."
+        )
+        tmp_iplist_include = ";".join(tmp_ip_values)
+
+        tmp_ipl_csv = run_dir / "ipl.ip.with.fqdn.to.exclude.csv"
+        write_csv(
+            tmp_ipl_csv,
+            ["name", "description", "include"],
+            [
+                {
+                    "name": tmp_iplist_name,
+                    "description": tmp_iplist_description,
+                    "include": tmp_iplist_include,
+                }
+            ],
+        )
+
+        step = run_step("import_tmp_iplist", [str(bin_dir / "workloader_ipl_import.sh"), str(tmp_ipl_csv)], root, logger)
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+
+        step = run_step("export_iplists_after_tmp", [str(bin_dir / "workloader_ipl_export.sh"), str(export_ipl)], root, logger)
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+
+        ipl_rows_after_tmp = csv_rows(export_ipl)
+        tmp_iplist_href = ""
+        for row in ipl_rows_after_tmp:
+            if choose(row, "name", "Name") == tmp_iplist_name:
+                tmp_iplist_href = choose(row, "href", "Href")
+                break
+
+        if not tmp_iplist_href:
+            logger.error("Temporary IPList href not found for %s", tmp_iplist_name)
+            return 1
+
+        href_labels_app_path = run_dir / "href_labels.app.csv"
+        href_labels_app_lines = [
+            line.strip()
+            for line in href_labels_app_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if tmp_iplist_href not in href_labels_app_lines:
+            href_labels_app_lines.append(tmp_iplist_href)
+            href_labels_app_lines = sorted(set(href_labels_app_lines))
+            href_labels_app_path.write_text(
+                "\n".join(href_labels_app_lines) + ("\n" if href_labels_app_lines else ""),
+                encoding="utf-8",
+            )
+
+        flow_file_second = run_dir / f"flow-out-fqdn-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-second.csv"
+        step = run_step(
+            "export_traffic_second_pass",
+            [
+                str(bin_dir / "workloader_traffic_out.sh"),
+                str(run_dir / "href_labels.wkld.m.csv"),
+                str(href_labels_app_path),
+                str(run_dir / "service.exlude.csv"),
+                start_date,
+                end_date,
+                str(flow_file_second),
+            ],
+            root,
+            logger,
+        )
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+
+        flow_rows_second = csv_rows(flow_file_second)
+        if flow_rows_second:
+            filtered_flow_second = filter_flow_rows(flow_rows_second)
+            write_csv(run_dir / flow_file_second.name, list(flow_rows_second[0].keys()), filtered_flow_second)
+        else:
+            filtered_flow_second = []
+
+        fusion_timestamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+        flow_file_fusion = run_dir / f"flow-out-fqdn-{fusion_timestamp}-fusion.csv"
+        merged_rows_by_key: Dict[str, Dict[str, str]] = {}
+        for row in filtered_flow + filtered_flow_second:
+            key = "|".join((v or "").strip() for v in row.values())
+            merged_rows_by_key[key] = row
+
+        if flow_rows:
+            flow_fieldnames = list(flow_rows[0].keys())
+        elif flow_rows_second:
+            flow_fieldnames = list(flow_rows_second[0].keys())
+        else:
+            flow_fieldnames = []
+
+        merged_flow_rows = list(merged_rows_by_key.values())
+        if flow_fieldnames:
+            write_csv(flow_file_fusion, flow_fieldnames, merged_flow_rows)
+        else:
+            flow_file_fusion.write_text("", encoding="utf-8")
+
+        href_ipl_tmp = run_dir / "href_ipl.tmp.csv"
+        href_ipl_tmp.write_text(f"{tmp_iplist_href}\n", encoding="utf-8")
+
+        step = run_step("delete_tmp_iplist", [str(bin_dir / "workloader_ipl_delete.sh"), str(href_ipl_tmp)], root, logger)
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+
+        filtered_flow = merged_flow_rows
+    else:
+        logger.warning("No destination IP extracted from cleaned first-pass flow; skipping temporary IPList enrichment.")
 
     ipl_rows = csv_rows(export_ipl)
     dna_prefix = conf.get("DNA_IPLIST_PREFIX", "DNA_")
