@@ -92,6 +92,26 @@ def short_fqdn(fqdn: str) -> str:
     return host
 
 
+def group_key_for_fqdn(fqdn: str) -> str:
+    fqdn_l = (fqdn or "").strip().lower().strip(".")
+    if not fqdn_l:
+        return ""
+
+    m = re.match(r"^[^.]+\.ece\.sgmonitoring\.(dev|prd)\..+$", fqdn_l)
+    if m:
+        return f"sgmonitoring.{m.group(1)}"
+
+    m = re.match(r"^kfk(?:dev|prd)-\d+-fed\.fed\.kafka\.(dev|prd)\..+$", fqdn_l)
+    if m:
+        return f"kafka.{m.group(1)}"
+
+    labels = fqdn_l.split(".")
+    if len(labels) >= 2 and labels[0] == "api":
+        return f"{labels[0]}.{labels[1]}"
+
+    return short_fqdn(fqdn_l)
+
+
 def parse_last_seen(desc: str) -> dt.date | None:
     m = re.search(r"Last seen at\s*:\s*(\d{4}-\d{2}-\d{2})", desc or "")
     if not m:
@@ -398,128 +418,6 @@ def main() -> int:
     else:
         filtered_flow = []
 
-    tmp_ip_values = sorted(
-        {
-            choose(r, "Destination IP", "destination_ip", default=(list(r.values())[14].strip() if len(list(r.values())) > 14 else ""))
-            for r in filtered_flow
-        }
-    )
-    tmp_ip_values = [ip for ip in tmp_ip_values if ip]
-
-    if tmp_ip_values:
-        tmp_suffix = now.strftime("%Y%m%d-%H%M%S")
-        tmp_iplist_name = f"_tmp_ipl.ip.with.fqdn.to.exclude_{tmp_suffix}-IPL"
-        tmp_iplist_description = (
-            "DO NOT USE! Temporary IPList to enhance FQDN detection. Will be automatically deleted after job execution."
-        )
-        tmp_iplist_include = ";".join(tmp_ip_values)
-
-        tmp_ipl_csv = run_dir / "ipl.ip.with.fqdn.to.exclude.csv"
-        write_csv(
-            tmp_ipl_csv,
-            ["name", "description", "include"],
-            [
-                {
-                    "name": tmp_iplist_name,
-                    "description": tmp_iplist_description,
-                    "include": tmp_iplist_include,
-                }
-            ],
-        )
-
-        step = run_step("import_tmp_iplist", [str(bin_dir / "workloader_ipl_import.sh"), str(tmp_ipl_csv)], root, logger)
-        steps.append(step)
-        if step.rc != 0:
-            return 1
-
-        step = run_step("export_iplists_after_tmp", [str(bin_dir / "workloader_ipl_export.sh"), str(export_ipl)], root, logger)
-        steps.append(step)
-        if step.rc != 0:
-            return 1
-
-        ipl_rows_after_tmp = csv_rows(export_ipl)
-        tmp_iplist_href = ""
-        for row in ipl_rows_after_tmp:
-            if choose(row, "name", "Name") == tmp_iplist_name:
-                tmp_iplist_href = choose(row, "href", "Href")
-                break
-
-        if not tmp_iplist_href:
-            logger.error("Temporary IPList href not found for %s", tmp_iplist_name)
-            return 1
-
-        href_labels_app_path = run_dir / "href_labels.app.csv"
-        href_labels_app_lines = [
-            line.strip()
-            for line in href_labels_app_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        if tmp_iplist_href not in href_labels_app_lines:
-            href_labels_app_lines.append(tmp_iplist_href)
-            href_labels_app_lines = sorted(set(href_labels_app_lines))
-            href_labels_app_path.write_text(
-                "\n".join(href_labels_app_lines) + ("\n" if href_labels_app_lines else ""),
-                encoding="utf-8",
-            )
-
-        flow_file_second = run_dir / f"flow-out-fqdn-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-second.csv"
-        step = run_step(
-            "export_traffic_second_pass",
-            [
-                str(bin_dir / "workloader_traffic_out.sh"),
-                str(run_dir / "href_labels.wkld.m.csv"),
-                str(href_labels_app_path),
-                str(run_dir / "service.exlude.csv"),
-                start_date,
-                end_date,
-                str(flow_file_second),
-            ],
-            root,
-            logger,
-        )
-        steps.append(step)
-        if step.rc != 0:
-            return 1
-
-        flow_rows_second = csv_rows(flow_file_second)
-        if flow_rows_second:
-            filtered_flow_second = filter_flow_rows(flow_rows_second)
-            write_csv(run_dir / flow_file_second.name, list(flow_rows_second[0].keys()), filtered_flow_second)
-        else:
-            filtered_flow_second = []
-
-        fusion_timestamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
-        flow_file_fusion = run_dir / f"flow-out-fqdn-{fusion_timestamp}-fusion.csv"
-        merged_rows_by_key: Dict[str, Dict[str, str]] = {}
-        for row in filtered_flow + filtered_flow_second:
-            key = "|".join((v or "").strip() for v in row.values())
-            merged_rows_by_key[key] = row
-
-        if flow_rows:
-            flow_fieldnames = list(flow_rows[0].keys())
-        elif flow_rows_second:
-            flow_fieldnames = list(flow_rows_second[0].keys())
-        else:
-            flow_fieldnames = []
-
-        merged_flow_rows = list(merged_rows_by_key.values())
-        if flow_fieldnames:
-            write_csv(flow_file_fusion, flow_fieldnames, merged_flow_rows)
-        else:
-            flow_file_fusion.write_text("", encoding="utf-8")
-
-        href_ipl_tmp = run_dir / "href_ipl.tmp.csv"
-        href_ipl_tmp.write_text(f"{tmp_iplist_href}\n", encoding="utf-8")
-
-        step = run_step("delete_tmp_iplist", [str(bin_dir / "workloader_ipl_delete.sh"), str(href_ipl_tmp)], root, logger)
-        steps.append(step)
-        if step.rc != 0:
-            return 1
-
-        filtered_flow = merged_flow_rows
-    else:
-        logger.warning("No destination IP extracted from cleaned first-pass flow; skipping temporary IPList enrichment.")
-
     ipl_rows = csv_rows(export_ipl)
     dna_prefix = conf.get("DNA_IPLIST_PREFIX", "DNA_")
     existing: Dict[str, Dict[str, str]] = {}
@@ -539,33 +437,33 @@ def main() -> int:
     dns_timeout = float(conf.get("DNS_LOOKUP_TIMEOUT_SEC", "2"))
     socket.setdefaulttimeout(dns_timeout)
 
-    ips_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
-    fqdns_by_short_fqdn: Dict[str, Set[str]] = defaultdict(set)
+    ips_by_group_key: Dict[str, Set[str]] = defaultdict(set)
+    fqdns_by_group_key: Dict[str, Set[str]] = defaultdict(set)
     for r in filtered_flow:
         vals = list(r.values())
         fqdn = choose(r, "Destination FQDN", default=vals[25].strip() if len(vals) > 25 else "")
         ip = choose(r, "Destination IP", default=vals[14].strip() if len(vals) > 14 else "")
-        short_name = short_fqdn(fqdn)
-        if fqdn and ip and short_name:
-            ips_by_short_fqdn[short_name].add(ip)
-            fqdns_by_short_fqdn[short_name].add(fqdn.lower())
+        group_key = group_key_for_fqdn(fqdn)
+        if fqdn and ip and group_key:
+            ips_by_group_key[group_key].add(ip)
+            fqdns_by_group_key[group_key].add(fqdn.lower())
 
             for candidate_fqdn in sorted(expand_fqdn_by_az(fqdn, az_tokens)):
                 if candidate_fqdn == fqdn.lower():
                     continue
                 candidate_ips = resolve_fqdn_ips(candidate_fqdn, logger)
                 if candidate_ips:
-                    fqdns_by_short_fqdn[short_name].add(candidate_fqdn)
-                    ips_by_short_fqdn[short_name].update(candidate_ips)
+                    fqdns_by_group_key[group_key].add(candidate_fqdn)
+                    ips_by_group_key[group_key].update(candidate_ips)
 
     today = now.date().isoformat()
     create_rows, update_rows = [], []
     created_for_report, updated_for_report = [], []
     current_state = {k: dict(v) for k, v in existing.items()}
 
-    for short_name, ips in sorted(ips_by_short_fqdn.items()):
-        fqdn_list = sorted(fqdns_by_short_fqdn[short_name])
-        iplist_name = sanitize_name(short_name)
+    for group_key, ips in sorted(ips_by_group_key.items()):
+        fqdn_list = sorted(fqdns_by_group_key[group_key])
+        iplist_name = sanitize_name(group_key)
         include = ";".join(sorted(ips))
         description = f"Last seen at : {today}"
         if iplist_name in existing:
