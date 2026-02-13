@@ -24,17 +24,14 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 4. Create `service.exlude.csv` excluding ICMP/ICMPv6.
 5. Export outbound flows into `flow-out-fqdn-<timestamp>.csv`.
 6. Purge flow rows where destination FQDN is empty, contains `.compute.`, or matches IP-style hostnames.
-7. Build `ipl.ip.with.fqdn.to.exclude.csv` from distinct `Destination IP` values found in the cleaned flow, then import temporary IPList `_tmp_ipl.ip.with.fqdn.to.exclude_<timestamp>-IPL`.
-8. Re-export IPLists, extract temporary IPList `href`, append this `href` to `href_labels.app.csv`, run a second outbound traffic export, and clean the second flow file with the same FQDN filters.
-9. Merge first-pass and second-pass cleaned flow files into `flow-out-fqdn-<new_timestamp>-fusion.csv`, write `href_ipl.tmp.csv`, then delete the temporary IPList using `workloader_ipl_delete.sh`.
-10. Parse existing DNA_* IPLists only (`name starts with DNA_`).
-11. Build a new short-FQDN/IP map from the merged filtered flow (short-FQDN = first label before the first `.`).
-12. For each FQDN containing a configured availability-zone token (default: `eu-fr-paris`, `eu-fr-north`, `hk-hongkong`, `sg-singapore`), generate sibling FQDNs for the other zones, resolve them through DNS, and merge all discovered FQDNs/IPs into the same target IPList.
-13. Create:
+7. Parse existing DNA_* IPLists only (`name starts with DNA_`).
+8. Build a grouping-key/IP map from the filtered flow. Grouping key uses explicit patterns for some domains (for example `sgmonitoring.dev`, `sgmonitoring.prd`, `kafka.dev`, `kafka.prd`, `api.<second-label>`) and falls back to short-FQDN.
+9. For each FQDN containing a configured availability-zone token (default: `eu-fr-paris`, `eu-fr-north`, `hk-hongkong`, `sg-singapore`), generate sibling FQDNs for the other zones, resolve them through DNS, and merge all discovered FQDNs/IPs into the same target IPList.
+10. Create:
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
    - `update.iplist.existing.fqdns.csv` with `href,description,include,fqdns`.
-14. Import create/update CSVs using `workloader_ipl_import.sh`.
-15. Build report sections:
+11. Import create/update CSVs using `workloader_ipl_import.sh`.
+12. Build report sections:
    - Execution status with response code and timestamps.
    - Created and updated DNA IPLists (added/removed IPs).
    - Deletion candidates with `Last seen at` older than 3 weeks.
