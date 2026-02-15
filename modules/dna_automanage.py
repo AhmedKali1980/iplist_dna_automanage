@@ -12,7 +12,6 @@ import csv
 import datetime as dt
 import html
 import logging
-import os
 import re
 import socket
 import subprocess
@@ -124,32 +123,56 @@ def parse_list(conf: Dict[str, str], key: str, default: str = "") -> List[str]:
     return [v.strip() for v in raw.split(";") if v.strip()]
 
 
-def parse_name_list(conf: Dict[str, str], key: str) -> List[str]:
-    raw = conf.get(key, "")
-    return [v.strip() for v in re.split(r"[;,]", raw) if v.strip()]
+def parse_tokens(raw: str) -> List[str]:
+    return [v.strip() for v in re.split(r"[;,]", raw or "") if v.strip()]
 
 
-def resolve_labelgroup_hrefs(labelgroup_rows: List[Dict[str, str]], names: List[str], logger: logging.Logger, key: str) -> List[str]:
-    name_to_href = {}
-    for row in labelgroup_rows:
-        name = choose(row, "name", "Name")
+def parse_types(conf: Dict[str, str], key: str) -> Set[str]:
+    return {v.lower() for v in parse_tokens(conf.get(key, ""))}
+
+
+def build_label_href_filter(
+    labels_rows: List[Dict[str, str]],
+    types: Set[str],
+    selectors_raw: str,
+    selector_mode: str,
+) -> List[str]:
+    selectors = parse_tokens(selectors_raw)
+    include_all = any(t.lower() == "all" for t in selectors)
+
+    positive = [t for t in selectors if not t.startswith("!") and t.lower() != "all"]
+    negative = [t[1:] for t in selectors if t.startswith("!") and len(t) > 1]
+
+    def matches(value: str, token: str) -> bool:
+        if selector_mode == "prefix":
+            return value.startswith(token)
+        return value == token
+
+    hrefs: Set[str] = set()
+    for row in labels_rows:
+        label_type = choose(row, "key", "Key").lower()
+        if types and label_type not in types:
+            continue
+
+        value = choose(row, "value", "Value")
         href = choose(row, "href", "Href")
-        if name and href:
-            name_to_href[name] = href
+        if not value or not href:
+            continue
 
-    hrefs: List[str] = []
-    missing: List[str] = []
-    for name in names:
-        href = name_to_href.get(name)
-        if href:
-            hrefs.append(href)
-        else:
-            missing.append(name)
+        selected = include_all or (any(matches(value, token) for token in positive) if positive else False)
+        if not selected:
+            continue
 
-    if missing:
-        logger.warning("Labelgroup names from %s not found in export: %s", key, ", ".join(missing))
+        if any(matches(value, token) for token in negative):
+            continue
 
-    return sorted(set(hrefs))
+        hrefs.add(href)
+
+    return sorted(hrefs)
+
+
+def write_href_file(path: Path, hrefs: List[str]) -> None:
+    path.write_text("\n".join(hrefs) + ("\n" if hrefs else ""), encoding="utf-8")
 
 
 def drop_rows_without_destination_fqdn(flow_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -400,67 +423,78 @@ def main() -> int:
             return 1
 
     labels_rows = csv_rows(export_label)
-    labelgroup_rows = csv_rows(export_labelgroup)
-
-    href_labels_all = sorted({choose(r, "href", "Href") for r in labels_rows if choose(r, "href", "Href")})
-    (run_dir / "href_labels.all.csv").write_text(
-        "\n".join(href_labels_all) + ("\n" if href_labels_all else ""), encoding="utf-8"
-    )
     (run_dir / "service.exlude.csv").write_text("PortNumber,NumericIANA\n0,1\n0,58\n", encoding="utf-8")
 
-    wave1_include_src = resolve_labelgroup_hrefs(
-        labelgroup_rows,
-        parse_name_list(conf, "LABELGROUP_TO_INCLUDE_SRC_WAVE1"),
-        logger,
-        "LABELGROUP_TO_INCLUDE_SRC_WAVE1",
-    )
-    wave1_exclude_src = resolve_labelgroup_hrefs(
-        labelgroup_rows,
-        parse_name_list(conf, "LABELGROUP_TO_EXCLUDE_SRC_WAVE1"),
-        logger,
-        "LABELGROUP_TO_EXCLUDE_SRC_WAVE1",
-    )
-    wave2_include_src = resolve_labelgroup_hrefs(
-        labelgroup_rows,
-        parse_name_list(conf, "LABELGROUP_TO_INCLUDE_SRC_WAVE2"),
-        logger,
-        "LABELGROUP_TO_INCLUDE_SRC_WAVE2",
-    )
-    wave2_exclude_src = resolve_labelgroup_hrefs(
-        labelgroup_rows,
-        parse_name_list(conf, "LABELGROUP_TO_EXCLUDE_SRC_WAVE2"),
-        logger,
-        "LABELGROUP_TO_EXCLUDE_SRC_WAVE2",
-    )
-
-    wave1_include_src_file = run_dir / "href_labelgroups.include.src.wave1.csv"
-    wave1_exclude_src_file = run_dir / "href_labelgroups.exclude.src.wave1.csv"
-    wave2_include_src_file = run_dir / "href_labelgroups.include.src.wave2.csv"
-    wave2_exclude_src_file = run_dir / "href_labelgroups.exclude.src.wave2.csv"
-
-    wave1_include_src_file.write_text("\n".join(wave1_include_src) + ("\n" if wave1_include_src else ""), encoding="utf-8")
-    wave1_exclude_src_file.write_text("\n".join(wave1_exclude_src) + ("\n" if wave1_exclude_src else ""), encoding="utf-8")
-    wave2_include_src_file.write_text("\n".join(wave2_include_src) + ("\n" if wave2_include_src else ""), encoding="utf-8")
-    wave2_exclude_src_file.write_text("\n".join(wave2_exclude_src) + ("\n" if wave2_exclude_src else ""), encoding="utf-8")
+    wave_specs = [
+        {
+            "name": "wave1",
+            "incl_src_types_key": "LABELS_TYPE_TO_INCLUDE_SRC_WAVE1",
+            "incl_src_values_key": "LABELS_PREFIX_TO_INCLUDE_SRC_WAVE1",
+            "incl_src_mode": "prefix",
+            "excl_src_types_key": "LABELS_TYPE_TO_EXCLUDE_SRC_WAVE1",
+            "excl_src_values_key": "LABELS_TO_EXCLUDE_SRC_WAVE1",
+            "excl_src_mode": "value",
+            "excl_dst_types_key": "LABELS_TYPE_TO_EXCLUDE_DST_WAVE1",
+            "excl_dst_values_key": "LABELS_TO_EXCLUDE_WAVE1",
+            "excl_dst_mode": "value",
+        },
+        {
+            "name": "wave2",
+            "incl_src_types_key": "LABELS_TYPE_TO_INCLUDE_SRC_WAVE2",
+            "incl_src_values_key": "LABELS_PREFIX_TO_INCLUDE_SRC_WAVE2",
+            "incl_src_mode": "prefix",
+            "excl_src_types_key": "LABELS_TYPE_TO_EXCLUDE_SRC_WAVE2",
+            "excl_src_values_key": "LABELS_TO_EXCLUDE_SRC_WAVE2",
+            "excl_src_mode": "value",
+            "excl_dst_types_key": "LABELS_TYPE_TO_EXCLUDE_DST_WAVE2",
+            "excl_dst_values_key": "LABELS_TO_EXCLUDE_WAVE2",
+            "excl_dst_mode": "value",
+        },
+    ]
 
     days = int(conf.get("NUMBER_OF_DAYS_AGO", "7"))
     start_date = (now.date() - dt.timedelta(days=days)).isoformat()
     end_date = now.date().isoformat()
-    wave1_flow_file = run_dir / f"flow-out-fqdn-wave1-{now.strftime('%Y%m%d-%H%M%S')}.csv"
-    wave2_flow_file = run_dir / f"flow-out-fqdn-wave2-{now.strftime('%Y%m%d-%H%M%S')}.csv"
-    flow_file = run_dir / f"flow-out-fqdn-{now.strftime('%Y%m%d-%H%M%S')}.csv"
+    timestamp = now.strftime('%Y%m%d-%H%M%S')
+    wave_files: List[Path] = []
 
-    for wave_name, include_src_file, exclude_src_file, wave_flow_file in [
-        ("export_traffic_wave1", wave1_include_src_file, wave1_exclude_src_file, wave1_flow_file),
-        ("export_traffic_wave2", wave2_include_src_file, wave2_exclude_src_file, wave2_flow_file),
-    ]:
+    for spec in wave_specs:
+        wave = spec["name"]
+        incl_src_hrefs = build_label_href_filter(
+            labels_rows,
+            parse_types(conf, spec["incl_src_types_key"]),
+            conf.get(spec["incl_src_values_key"], ""),
+            spec["incl_src_mode"],
+        )
+        excl_src_hrefs = build_label_href_filter(
+            labels_rows,
+            parse_types(conf, spec["excl_src_types_key"]),
+            conf.get(spec["excl_src_values_key"], ""),
+            spec["excl_src_mode"],
+        )
+        excl_dst_hrefs = build_label_href_filter(
+            labels_rows,
+            parse_types(conf, spec["excl_dst_types_key"]),
+            conf.get(spec["excl_dst_values_key"], ""),
+            spec["excl_dst_mode"],
+        )
+
+        incl_src_file = run_dir / f"href_labels.include.src.{wave}.csv"
+        excl_src_file = run_dir / f"href_labels.exclude.src.{wave}.csv"
+        excl_dst_file = run_dir / f"href_labels.exclude.dst.{wave}.csv"
+        wave_flow_file = run_dir / f"flow-out-fqdn-{wave}-{timestamp}.csv"
+
+        write_href_file(incl_src_file, incl_src_hrefs)
+        write_href_file(excl_src_file, excl_src_hrefs)
+        write_href_file(excl_dst_file, excl_dst_hrefs)
+
         step = run_step(
-            wave_name,
+            f"export_traffic_{wave}",
             [
                 str(bin_dir / "workloader_traffic_out.sh"),
-                str(include_src_file),
-                str(exclude_src_file),
-                str(run_dir / "href_labels.all.csv"),
+                str(incl_src_file),
+                str(excl_src_file),
+                str(excl_dst_file),
                 str(run_dir / "service.exlude.csv"),
                 start_date,
                 end_date,
@@ -472,20 +506,27 @@ def main() -> int:
         steps.append(step)
         if step.rc != 0:
             return 1
+        wave_files.append(wave_flow_file)
 
+    flow_file = run_dir / f"flow-out-fqdn-{timestamp}.csv"
     merged_flow_rows: List[Dict[str, str]] = []
-    for wave_flow_file in [wave1_flow_file, wave2_flow_file]:
+    merged_headers: List[str] = []
+
+    for wave_flow_file in wave_files:
         wave_flow_rows = csv_rows(wave_flow_file)
-        wave_flow_rows = drop_rows_without_destination_fqdn(wave_flow_rows)
-        if wave_flow_rows:
-            write_csv(wave_flow_file, list(wave_flow_rows[0].keys()), wave_flow_rows)
-            merged_flow_rows.extend(wave_flow_rows)
+        if wave_flow_rows and not merged_headers:
+            merged_headers = list(wave_flow_rows[0].keys())
+        merged_flow_rows.extend(wave_flow_rows)
 
     if merged_flow_rows:
-        write_csv(flow_file, list(merged_flow_rows[0].keys()), merged_flow_rows)
-        filtered_flow = filter_flow_rows(merged_flow_rows)
-        write_csv(run_dir / flow_file.name, list(merged_flow_rows[0].keys()), filtered_flow)
+        merged_no_empty = drop_rows_without_destination_fqdn(merged_flow_rows)
+        if merged_no_empty:
+            write_csv(flow_file, list(merged_no_empty[0].keys()), merged_no_empty)
+        else:
+            write_csv(flow_file, merged_headers, [])
+        filtered_flow = filter_flow_rows(merged_no_empty)
     else:
+        flow_file.write_text("", encoding="utf-8")
         filtered_flow = []
         flow_file.write_text("", encoding="utf-8")
 
