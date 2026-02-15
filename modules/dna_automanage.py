@@ -12,7 +12,6 @@ import csv
 import datetime as dt
 import html
 import logging
-import os
 import re
 import socket
 import subprocess
@@ -54,13 +53,19 @@ def read_conf(path: Path) -> Dict[str, str]:
 
 def run_step(name: str, cmd: List[str], cwd: Path, logger: logging.Logger) -> StepResult:
     started = dt.datetime.now()
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    ended = dt.datetime.now()
-    details = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    logger.info("%s rc=%s", name, proc.returncode)
-    if proc.returncode != 0:
-        logger.error("%s failed: %s", name, details)
-    return StepResult(name=name, started_at=started, ended_at=ended, rc=proc.returncode, details=details.strip())
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        ended = dt.datetime.now()
+        details = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        logger.info("%s rc=%s", name, proc.returncode)
+        if proc.returncode != 0:
+            logger.error("%s failed: %s", name, details)
+        return StepResult(name=name, started_at=started, ended_at=ended, rc=proc.returncode, details=details.strip())
+    except FileNotFoundError as exc:
+        ended = dt.datetime.now()
+        details = f"Command not found for step {name}: {exc}"
+        logger.error(details)
+        return StepResult(name=name, started_at=started, ended_at=ended, rc=127, details=details)
 
 
 def csv_rows(path: Path) -> List[Dict[str, str]]:
@@ -122,6 +127,71 @@ def parse_last_seen(desc: str) -> dt.date | None:
 def parse_list(conf: Dict[str, str], key: str, default: str = "") -> List[str]:
     raw = conf.get(key, default)
     return [v.strip() for v in raw.split(";") if v.strip()]
+
+
+def parse_tokens(raw: str) -> List[str]:
+    return [v.strip() for v in re.split(r"[;,]", raw or "") if v.strip()]
+
+
+def parse_types(conf: Dict[str, str], key: str) -> Set[str]:
+    return {v.lower() for v in parse_tokens(conf.get(key, ""))}
+
+
+def build_label_href_filter(
+    labels_rows: List[Dict[str, str]],
+    types: Set[str],
+    selectors_raw: str,
+    selector_mode: str,
+) -> List[str]:
+    selectors = parse_tokens(selectors_raw)
+    include_all = any(t.lower() == "all" for t in selectors)
+
+    positive = [t for t in selectors if not t.startswith("!") and t.lower() != "all"]
+    negative = [t[1:] for t in selectors if t.startswith("!") and len(t) > 1]
+
+    def matches(value: str, token: str) -> bool:
+        if selector_mode == "prefix":
+            return value.startswith(token)
+        return value == token
+
+    hrefs: Set[str] = set()
+    for row in labels_rows:
+        label_type = choose(row, "key", "Key").lower()
+        if types and label_type not in types:
+            continue
+
+        value = choose(row, "value", "Value")
+        href = choose(row, "href", "Href")
+        if not value or not href:
+            continue
+
+        if include_all or positive:
+            selected = include_all or any(matches(value, token) for token in positive)
+        else:
+            selected = bool(negative)
+        if not selected:
+            continue
+
+        if any(matches(value, token) for token in negative):
+            continue
+
+        hrefs.add(href)
+
+    return sorted(hrefs)
+
+
+def write_href_file(path: Path, hrefs: List[str]) -> None:
+    path.write_text("\n".join(hrefs) + ("\n" if hrefs else ""), encoding="utf-8")
+
+
+def drop_rows_without_destination_fqdn(flow_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    kept: List[Dict[str, str]] = []
+    for row in flow_rows:
+        vals = list(row.values())
+        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
+        if fqdn:
+            kept.append(row)
+    return kept
 
 
 def expand_fqdn_by_az(fqdn: str, az_tokens: List[str]) -> Set[str]:
@@ -337,18 +407,15 @@ def main() -> int:
     bin_dir = root / "bin"
 
     export_ipl = run_dir / "export_iplists.csv"
-    export_wkld = run_dir / "export_wkld.m.csv"
     export_label = run_dir / "export_label.csv"
 
     expected_exports = {
         "export_iplists": export_ipl,
-        "export_managed_workloads": export_wkld,
         "export_labels": export_label,
     }
 
     for name, cmd in [
         ("export_iplists", [str(bin_dir / "workloader_ipl_export.sh"), str(export_ipl)]),
-        ("export_managed_workloads", [str(bin_dir / "workloader_wkld_m_export.sh"), str(export_wkld)]),
         ("export_labels", [str(bin_dir / "workloader_label_export.sh"), str(export_label)]),
     ]:
         step = run_step(name, cmd, root, logger)
@@ -362,60 +429,110 @@ def main() -> int:
             return 1
 
     labels_rows = csv_rows(export_label)
-    wkld_rows = csv_rows(export_wkld)
-
-    excluded_prefixes = [p for p in conf.get("EXCLUDED_LABEL_PREFIXES", "").split(";") if p]
-    wkld_apps: Set[str] = set()
-    for r in wkld_rows:
-        app_value = choose(r, "app", "App", "APP", default="")
-        if not app_value:
-            vals = list(r.values())
-            if len(vals) > 7:
-                app_value = (vals[7] or "").strip()
-        if app_value and not any(app_value.startswith(p) for p in excluded_prefixes):
-            wkld_apps.add(app_value)
-
-    label_href_by_value = {choose(r, "value", "Value"): choose(r, "href", "Href") for r in labels_rows}
-    href_labels_wkld = sorted({label_href_by_value[v] for v in wkld_apps if v in label_href_by_value and label_href_by_value[v]})
-
-    href_labels_app = sorted({choose(r, "href", "Href") for r in labels_rows if choose(r, "key", "Key") == "app" and choose(r, "href", "Href")})
-
-    (run_dir / "href_labels.wkld.m.csv").write_text(
-        "\n".join(href_labels_wkld) + ("\n" if href_labels_wkld else ""), encoding="utf-8"
-    )
-    (run_dir / "href_labels.app.csv").write_text(
-        "\n".join(href_labels_app) + ("\n" if href_labels_app else ""), encoding="utf-8"
-    )
     (run_dir / "service.exlude.csv").write_text("PortNumber,NumericIANA\n0,1\n0,58\n", encoding="utf-8")
+
+    wave_specs = [
+        {
+            "name": "wave1",
+            "incl_src_types_key": "LABELS_TYPE_TO_INCLUDE_SRC_WAVE1",
+            "incl_src_values_key": "LABELS_PREFIX_TO_INCLUDE_SRC_WAVE1",
+            "incl_src_mode": "prefix",
+            "excl_src_types_key": "LABELS_TYPE_TO_EXCLUDE_SRC_WAVE1",
+            "excl_src_values_key": "LABELS_TO_EXCLUDE_SRC_WAVE1",
+            "excl_src_mode": "value",
+            "excl_dst_types_key": "LABELS_TYPE_TO_EXCLUDE_DST_WAVE1",
+            "excl_dst_values_key": "LABELS_TO_EXCLUDE_WAVE1",
+            "excl_dst_mode": "value",
+        },
+        {
+            "name": "wave2",
+            "incl_src_types_key": "LABELS_TYPE_TO_INCLUDE_SRC_WAVE2",
+            "incl_src_values_key": "LABELS_PREFIX_TO_INCLUDE_SRC_WAVE2",
+            "incl_src_mode": "prefix",
+            "excl_src_types_key": "LABELS_TYPE_TO_EXCLUDE_SRC_WAVE2",
+            "excl_src_values_key": "LABELS_TO_EXCLUDE_SRC_WAVE2",
+            "excl_src_mode": "value",
+            "excl_dst_types_key": "LABELS_TYPE_TO_EXCLUDE_DST_WAVE2",
+            "excl_dst_values_key": "LABELS_TO_EXCLUDE_WAVE2",
+            "excl_dst_mode": "value",
+        },
+    ]
 
     days = int(conf.get("NUMBER_OF_DAYS_AGO", "7"))
     start_date = (now.date() - dt.timedelta(days=days)).isoformat()
     end_date = now.date().isoformat()
-    flow_file = run_dir / f"flow-out-fqdn-{now.strftime('%Y%m%d-%H%M%S')}.csv"
+    timestamp = now.strftime('%Y%m%d-%H%M%S')
+    wave_files: List[Path] = []
 
-    step = run_step(
-        "export_traffic",
-        [
-            str(bin_dir / "workloader_traffic_out.sh"),
-            str(run_dir / "href_labels.wkld.m.csv"),
-            str(run_dir / "href_labels.app.csv"),
-            str(run_dir / "service.exlude.csv"),
-            start_date,
-            end_date,
-            str(flow_file),
-        ],
-        root,
-        logger,
-    )
-    steps.append(step)
-    if step.rc != 0:
-        return 1
+    for spec in wave_specs:
+        wave = spec["name"]
+        incl_src_hrefs = build_label_href_filter(
+            labels_rows,
+            parse_types(conf, spec["incl_src_types_key"]),
+            conf.get(spec["incl_src_values_key"], ""),
+            spec["incl_src_mode"],
+        )
+        excl_src_hrefs = build_label_href_filter(
+            labels_rows,
+            parse_types(conf, spec["excl_src_types_key"]),
+            conf.get(spec["excl_src_values_key"], ""),
+            spec["excl_src_mode"],
+        )
+        excl_dst_hrefs = build_label_href_filter(
+            labels_rows,
+            parse_types(conf, spec["excl_dst_types_key"]),
+            conf.get(spec["excl_dst_values_key"], ""),
+            spec["excl_dst_mode"],
+        )
 
-    flow_rows = csv_rows(flow_file)
-    if flow_rows:
-        filtered_flow = filter_flow_rows(flow_rows)
-        write_csv(run_dir / flow_file.name, list(flow_rows[0].keys()), filtered_flow)
+        incl_src_file = run_dir / f"href_labels.include.src.{wave}.csv"
+        excl_src_file = run_dir / f"href_labels.exclude.src.{wave}.csv"
+        excl_dst_file = run_dir / f"href_labels.exclude.dst.{wave}.csv"
+        wave_flow_file = run_dir / f"flow-out-fqdn-{wave}-{timestamp}.csv"
+
+        write_href_file(incl_src_file, incl_src_hrefs)
+        write_href_file(excl_src_file, excl_src_hrefs)
+        write_href_file(excl_dst_file, excl_dst_hrefs)
+
+        step = run_step(
+            f"export_traffic_{wave}",
+            [
+                str(bin_dir / "workloader_traffic_out.sh"),
+                str(incl_src_file),
+                str(excl_src_file),
+                str(excl_dst_file),
+                str(run_dir / "service.exlude.csv"),
+                start_date,
+                end_date,
+                str(wave_flow_file),
+            ],
+            root,
+            logger,
+        )
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+        wave_files.append(wave_flow_file)
+
+    flow_file = run_dir / f"flow-out-fqdn-{timestamp}.csv"
+    merged_flow_rows: List[Dict[str, str]] = []
+    merged_headers: List[str] = []
+
+    for wave_flow_file in wave_files:
+        wave_flow_rows = csv_rows(wave_flow_file)
+        if wave_flow_rows and not merged_headers:
+            merged_headers = list(wave_flow_rows[0].keys())
+        merged_flow_rows.extend(wave_flow_rows)
+
+    if merged_flow_rows:
+        merged_no_empty = drop_rows_without_destination_fqdn(merged_flow_rows)
+        if merged_no_empty:
+            write_csv(flow_file, list(merged_no_empty[0].keys()), merged_no_empty)
+        else:
+            write_csv(flow_file, merged_headers, [])
+        filtered_flow = filter_flow_rows(merged_no_empty)
     else:
+        flow_file.write_text("", encoding="utf-8")
         filtered_flow = []
 
     ipl_rows = csv_rows(export_ipl)
