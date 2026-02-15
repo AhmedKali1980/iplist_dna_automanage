@@ -124,6 +124,44 @@ def parse_list(conf: Dict[str, str], key: str, default: str = "") -> List[str]:
     return [v.strip() for v in raw.split(";") if v.strip()]
 
 
+def parse_name_list(conf: Dict[str, str], key: str) -> List[str]:
+    raw = conf.get(key, "")
+    return [v.strip() for v in re.split(r"[;,]", raw) if v.strip()]
+
+
+def resolve_labelgroup_hrefs(labelgroup_rows: List[Dict[str, str]], names: List[str], logger: logging.Logger, key: str) -> List[str]:
+    name_to_href = {}
+    for row in labelgroup_rows:
+        name = choose(row, "name", "Name")
+        href = choose(row, "href", "Href")
+        if name and href:
+            name_to_href[name] = href
+
+    hrefs: List[str] = []
+    missing: List[str] = []
+    for name in names:
+        href = name_to_href.get(name)
+        if href:
+            hrefs.append(href)
+        else:
+            missing.append(name)
+
+    if missing:
+        logger.warning("Labelgroup names from %s not found in export: %s", key, ", ".join(missing))
+
+    return sorted(set(hrefs))
+
+
+def drop_rows_without_destination_fqdn(flow_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    kept: List[Dict[str, str]] = []
+    for row in flow_rows:
+        vals = list(row.values())
+        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
+        if fqdn:
+            kept.append(row)
+    return kept
+
+
 def expand_fqdn_by_az(fqdn: str, az_tokens: List[str]) -> Set[str]:
     fqdn_l = (fqdn or "").strip().lower()
     if not fqdn_l:
@@ -337,19 +375,19 @@ def main() -> int:
     bin_dir = root / "bin"
 
     export_ipl = run_dir / "export_iplists.csv"
-    export_wkld = run_dir / "export_wkld.m.csv"
     export_label = run_dir / "export_label.csv"
+    export_labelgroup = run_dir / "export_labelgroup.csv"
 
     expected_exports = {
         "export_iplists": export_ipl,
-        "export_managed_workloads": export_wkld,
         "export_labels": export_label,
+        "export_labelgroups": export_labelgroup,
     }
 
     for name, cmd in [
         ("export_iplists", [str(bin_dir / "workloader_ipl_export.sh"), str(export_ipl)]),
-        ("export_managed_workloads", [str(bin_dir / "workloader_wkld_m_export.sh"), str(export_wkld)]),
         ("export_labels", [str(bin_dir / "workloader_label_export.sh"), str(export_label)]),
+        ("export_labelgroups", [str(bin_dir / "workloader_labelgroup.sh"), str(export_labelgroup)]),
     ]:
         step = run_step(name, cmd, root, logger)
         steps.append(step)
@@ -362,61 +400,94 @@ def main() -> int:
             return 1
 
     labels_rows = csv_rows(export_label)
-    wkld_rows = csv_rows(export_wkld)
+    labelgroup_rows = csv_rows(export_labelgroup)
 
-    excluded_prefixes = [p for p in conf.get("EXCLUDED_LABEL_PREFIXES", "").split(";") if p]
-    wkld_apps: Set[str] = set()
-    for r in wkld_rows:
-        app_value = choose(r, "app", "App", "APP", default="")
-        if not app_value:
-            vals = list(r.values())
-            if len(vals) > 7:
-                app_value = (vals[7] or "").strip()
-        if app_value and not any(app_value.startswith(p) for p in excluded_prefixes):
-            wkld_apps.add(app_value)
-
-    label_href_by_value = {choose(r, "value", "Value"): choose(r, "href", "Href") for r in labels_rows}
-    href_labels_wkld = sorted({label_href_by_value[v] for v in wkld_apps if v in label_href_by_value and label_href_by_value[v]})
-
-    href_labels_app = sorted({choose(r, "href", "Href") for r in labels_rows if choose(r, "key", "Key") == "app" and choose(r, "href", "Href")})
-
-    (run_dir / "href_labels.wkld.m.csv").write_text(
-        "\n".join(href_labels_wkld) + ("\n" if href_labels_wkld else ""), encoding="utf-8"
-    )
-    (run_dir / "href_labels.app.csv").write_text(
-        "\n".join(href_labels_app) + ("\n" if href_labels_app else ""), encoding="utf-8"
+    href_labels_all = sorted({choose(r, "href", "Href") for r in labels_rows if choose(r, "href", "Href")})
+    (run_dir / "href_labels.all.csv").write_text(
+        "\n".join(href_labels_all) + ("\n" if href_labels_all else ""), encoding="utf-8"
     )
     (run_dir / "service.exlude.csv").write_text("PortNumber,NumericIANA\n0,1\n0,58\n", encoding="utf-8")
+
+    wave1_include_src = resolve_labelgroup_hrefs(
+        labelgroup_rows,
+        parse_name_list(conf, "LABELGROUP_TO_INCLUDE_SRC_WAVE1"),
+        logger,
+        "LABELGROUP_TO_INCLUDE_SRC_WAVE1",
+    )
+    wave1_exclude_src = resolve_labelgroup_hrefs(
+        labelgroup_rows,
+        parse_name_list(conf, "LABELGROUP_TO_EXCLUDE_SRC_WAVE1"),
+        logger,
+        "LABELGROUP_TO_EXCLUDE_SRC_WAVE1",
+    )
+    wave2_include_src = resolve_labelgroup_hrefs(
+        labelgroup_rows,
+        parse_name_list(conf, "LABELGROUP_TO_INCLUDE_SRC_WAVE2"),
+        logger,
+        "LABELGROUP_TO_INCLUDE_SRC_WAVE2",
+    )
+    wave2_exclude_src = resolve_labelgroup_hrefs(
+        labelgroup_rows,
+        parse_name_list(conf, "LABELGROUP_TO_EXCLUDE_SRC_WAVE2"),
+        logger,
+        "LABELGROUP_TO_EXCLUDE_SRC_WAVE2",
+    )
+
+    wave1_include_src_file = run_dir / "href_labelgroups.include.src.wave1.csv"
+    wave1_exclude_src_file = run_dir / "href_labelgroups.exclude.src.wave1.csv"
+    wave2_include_src_file = run_dir / "href_labelgroups.include.src.wave2.csv"
+    wave2_exclude_src_file = run_dir / "href_labelgroups.exclude.src.wave2.csv"
+
+    wave1_include_src_file.write_text("\n".join(wave1_include_src) + ("\n" if wave1_include_src else ""), encoding="utf-8")
+    wave1_exclude_src_file.write_text("\n".join(wave1_exclude_src) + ("\n" if wave1_exclude_src else ""), encoding="utf-8")
+    wave2_include_src_file.write_text("\n".join(wave2_include_src) + ("\n" if wave2_include_src else ""), encoding="utf-8")
+    wave2_exclude_src_file.write_text("\n".join(wave2_exclude_src) + ("\n" if wave2_exclude_src else ""), encoding="utf-8")
 
     days = int(conf.get("NUMBER_OF_DAYS_AGO", "7"))
     start_date = (now.date() - dt.timedelta(days=days)).isoformat()
     end_date = now.date().isoformat()
+    wave1_flow_file = run_dir / f"flow-out-fqdn-wave1-{now.strftime('%Y%m%d-%H%M%S')}.csv"
+    wave2_flow_file = run_dir / f"flow-out-fqdn-wave2-{now.strftime('%Y%m%d-%H%M%S')}.csv"
     flow_file = run_dir / f"flow-out-fqdn-{now.strftime('%Y%m%d-%H%M%S')}.csv"
 
-    step = run_step(
-        "export_traffic",
-        [
-            str(bin_dir / "workloader_traffic_out.sh"),
-            str(run_dir / "href_labels.wkld.m.csv"),
-            str(run_dir / "href_labels.app.csv"),
-            str(run_dir / "service.exlude.csv"),
-            start_date,
-            end_date,
-            str(flow_file),
-        ],
-        root,
-        logger,
-    )
-    steps.append(step)
-    if step.rc != 0:
-        return 1
+    for wave_name, include_src_file, exclude_src_file, wave_flow_file in [
+        ("export_traffic_wave1", wave1_include_src_file, wave1_exclude_src_file, wave1_flow_file),
+        ("export_traffic_wave2", wave2_include_src_file, wave2_exclude_src_file, wave2_flow_file),
+    ]:
+        step = run_step(
+            wave_name,
+            [
+                str(bin_dir / "workloader_traffic_out.sh"),
+                str(include_src_file),
+                str(exclude_src_file),
+                str(run_dir / "href_labels.all.csv"),
+                str(run_dir / "service.exlude.csv"),
+                start_date,
+                end_date,
+                str(wave_flow_file),
+            ],
+            root,
+            logger,
+        )
+        steps.append(step)
+        if step.rc != 0:
+            return 1
 
-    flow_rows = csv_rows(flow_file)
-    if flow_rows:
-        filtered_flow = filter_flow_rows(flow_rows)
-        write_csv(run_dir / flow_file.name, list(flow_rows[0].keys()), filtered_flow)
+    merged_flow_rows: List[Dict[str, str]] = []
+    for wave_flow_file in [wave1_flow_file, wave2_flow_file]:
+        wave_flow_rows = csv_rows(wave_flow_file)
+        wave_flow_rows = drop_rows_without_destination_fqdn(wave_flow_rows)
+        if wave_flow_rows:
+            write_csv(wave_flow_file, list(wave_flow_rows[0].keys()), wave_flow_rows)
+            merged_flow_rows.extend(wave_flow_rows)
+
+    if merged_flow_rows:
+        write_csv(flow_file, list(merged_flow_rows[0].keys()), merged_flow_rows)
+        filtered_flow = filter_flow_rows(merged_flow_rows)
+        write_csv(run_dir / flow_file.name, list(merged_flow_rows[0].keys()), filtered_flow)
     else:
         filtered_flow = []
+        flow_file.write_text("", encoding="utf-8")
 
     ipl_rows = csv_rows(export_ipl)
     dna_prefix = conf.get("DNA_IPLIST_PREFIX", "DNA_")
