@@ -53,13 +53,19 @@ def read_conf(path: Path) -> Dict[str, str]:
 
 def run_step(name: str, cmd: List[str], cwd: Path, logger: logging.Logger) -> StepResult:
     started = dt.datetime.now()
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    ended = dt.datetime.now()
-    details = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    logger.info("%s rc=%s", name, proc.returncode)
-    if proc.returncode != 0:
-        logger.error("%s failed: %s", name, details)
-    return StepResult(name=name, started_at=started, ended_at=ended, rc=proc.returncode, details=details.strip())
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        ended = dt.datetime.now()
+        details = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        logger.info("%s rc=%s", name, proc.returncode)
+        if proc.returncode != 0:
+            logger.error("%s failed: %s", name, details)
+        return StepResult(name=name, started_at=started, ended_at=ended, rc=proc.returncode, details=details.strip())
+    except FileNotFoundError as exc:
+        ended = dt.datetime.now()
+        details = f"Command not found for step {name}: {exc}"
+        logger.error(details)
+        return StepResult(name=name, started_at=started, ended_at=ended, rc=127, details=details)
 
 
 def csv_rows(path: Path) -> List[Dict[str, str]]:
