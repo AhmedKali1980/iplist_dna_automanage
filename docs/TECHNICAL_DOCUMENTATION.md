@@ -31,8 +31,8 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 10. Create:
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
    - `update.iplist.existing.fqdns.csv` with `href,description,include,fqdns`.
-11. Import create/update CSVs using `workloader_ipl_import.sh`.
-12. Build report sections:
+12. Import create/update CSVs using `workloader_ipl_import.sh`.
+13. Build report sections:
    - Execution status with response code and timestamps.
    - Created and updated DNA IPLists (added/removed IPs).
    - Deletion candidates with `Last seen at` older than 3 weeks.

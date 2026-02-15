@@ -399,15 +399,18 @@ def main() -> int:
 
     export_ipl = run_dir / "export_iplists.csv"
     export_label = run_dir / "export_label.csv"
+    export_labelgroup = run_dir / "export_labelgroup.csv"
 
     expected_exports = {
         "export_iplists": export_ipl,
         "export_labels": export_label,
+        "export_labelgroups": export_labelgroup,
     }
 
     for name, cmd in [
         ("export_iplists", [str(bin_dir / "workloader_ipl_export.sh"), str(export_ipl)]),
         ("export_labels", [str(bin_dir / "workloader_label_export.sh"), str(export_label)]),
+        ("export_labelgroups", [str(bin_dir / "workloader_labelgroup.sh"), str(export_labelgroup)]),
     ]:
         step = run_step(name, cmd, root, logger)
         steps.append(step)
@@ -525,6 +528,7 @@ def main() -> int:
     else:
         flow_file.write_text("", encoding="utf-8")
         filtered_flow = []
+        flow_file.write_text("", encoding="utf-8")
 
     ipl_rows = csv_rows(export_ipl)
     dna_prefix = conf.get("DNA_IPLIST_PREFIX", "DNA_")
