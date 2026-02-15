@@ -18,7 +18,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 
 ## 3. Implemented workflow
 1. Export `export_iplists.csv` and `export_label.csv`.
-2. Build label-filter href files for each wave from `global.conf` using label `key` (type) + value rules (`all`, exact values, prefixes, and negation with `!`).
+2. Build label-filter href files for each wave from `global.conf` using label `key` (type) + value rules (`all`, exact values, prefixes, and negation with `!`). A selector list containing only negative terms (for example `!PRD`) means "all matching labels except these negatives".
 3. Create `service.exlude.csv` excluding ICMP/ICMPv6.
 4. Export outbound flows in two passes:
    - `flow-out-fqdn-wave1-<timestamp>.csv`

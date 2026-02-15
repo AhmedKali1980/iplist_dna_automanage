@@ -165,7 +165,10 @@ def build_label_href_filter(
         if not value or not href:
             continue
 
-        selected = include_all or (any(matches(value, token) for token in positive) if positive else False)
+        if include_all or positive:
+            selected = include_all or any(matches(value, token) for token in positive)
+        else:
+            selected = bool(negative)
         if not selected:
             continue
 
