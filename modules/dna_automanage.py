@@ -240,6 +240,20 @@ def filter_flow_rows(flow_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return filtered_flow
 
 
+def parse_semicolon_set(raw: str) -> Set[str]:
+    return {v.strip() for v in (raw or "").split(";") if v.strip()}
+
+
+def collect_flow_ips(rows: List[Dict[str, str]]) -> Set[str]:
+    ips: Set[str] = set()
+    for row in rows:
+        vals = list(row.values())
+        dst_ip = choose(row, "Destination IP", "destination_ip", default=vals[14].strip() if len(vals) > 14 else "")
+        if dst_ip:
+            ips.add(dst_ip)
+    return ips
+
+
 def html_escape_join(values: List[str], sep: str = "<br/>") -> str:
     return sep.join(html.escape(v) for v in values) if values else "-"
 
@@ -580,43 +594,157 @@ def main() -> int:
     today = now.date().isoformat()
     create_rows, update_rows = [], []
     created_for_report, updated_for_report = [], []
+    kept_by_dns_for_report, kept_by_flow_for_report = [], []
     current_state = {k: dict(v) for k, v in existing.items()}
 
+    desired_by_iplist: Dict[str, Dict[str, Set[str]]] = {}
     for group_key, ips in sorted(ips_by_group_key.items()):
-        fqdn_list = sorted(fqdns_by_group_key[group_key])
         iplist_name = sanitize_name(group_key)
-        include = ";".join(sorted(ips))
+        desired_by_iplist[iplist_name] = {
+            "ips": set(ips),
+            "fqdns": set(fqdns_by_group_key[group_key]),
+        }
+
+    candidate_ips_to_delete: Set[str] = set()
+    for iplist_name, old in existing.items():
+        old_ips = parse_semicolon_set(old["include"])
+        desired_ips = desired_by_iplist.get(iplist_name, {}).get("ips", set())
+        candidate_ips_to_delete.update(old_ips - desired_ips)
+
+    flow_seen_ips_in_candidates: Set[str] = set()
+    if candidate_ips_to_delete:
+        tmp_name = f"_tmp_ip.to.delete_{timestamp}-IPL"
+        tmp_create_csv = run_dir / "new.iplist.tmp.egress.to.delete.csv"
+        tmp_href_file = run_dir / "href_tmp.egress.to.delete.csv"
+        href_ips_to_delete_csv = run_dir / "href_ips.to.delete.csv"
+        flow_out_delete_candidates = run_dir / f"flow-out-dst-delete-candidates-{timestamp}.csv"
+
+        tmp_payload = {
+            "description": f"Temporary candidate IP list generated at {now.isoformat(timespec='seconds')}",
+            "include": ";".join(sorted(candidate_ips_to_delete)),
+            "fqdns": "",
+        }
+
+        with tmp_create_csv.open("w", encoding="utf-8", newline="") as f:
+            wr = csv.DictWriter(f, fieldnames=["name", "description", "include", "fqdns"])
+            wr.writeheader()
+            wr.writerow({"name": tmp_name, **tmp_payload})
+        step = run_step("create_tmp_delete_iplist", [str(bin_dir / "workloader_ipl_import.sh"), str(tmp_create_csv)], root, logger)
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+
+        tmp_export_csv = run_dir / "export_iplists.with.tmp.csv"
+        step = run_step("export_iplists_for_tmp_href", [str(bin_dir / "workloader_ipl_export.sh"), str(tmp_export_csv)], root, logger)
+        steps.append(step)
+        if step.rc != 0:
+            return 1
+
+        tmp_rows = csv_rows(tmp_export_csv)
+        tmp_href = ""
+        for row in tmp_rows:
+            if choose(row, "name", "Name") == tmp_name:
+                tmp_href = choose(row, "href", "Href")
+                break
+
+        if not tmp_href:
+            logger.error("Temporary IPList %s href not found after export", tmp_name)
+            return 1
+
+        tmp_href_file.write_text(tmp_href + "\n", encoding="utf-8")
+        href_ips_to_delete_csv.write_text(tmp_href + "\n", encoding="utf-8")
+
+        flow_days = int(conf.get("FLOW_DELETE_VERIFICATION_DAYS", "60"))
+        flow_start = (now.date() - dt.timedelta(days=flow_days)).isoformat()
+        flow_end = now.date().isoformat()
+
+        flow_step_rc = 0
+        try:
+            step = run_step(
+                "export_traffic_delete_candidates",
+                [
+                    str(bin_dir / "workloader_traffic_out_dst.sh"),
+                    str(href_ips_to_delete_csv),
+                    flow_start,
+                    flow_end,
+                    str(flow_out_delete_candidates),
+                ],
+                root,
+                logger,
+            )
+            steps.append(step)
+            flow_step_rc = step.rc
+
+            if flow_step_rc == 0 and flow_out_delete_candidates.exists() and flow_out_delete_candidates.stat().st_size > 0:
+                flow_seen_ips_in_candidates = collect_flow_ips(csv_rows(flow_out_delete_candidates))
+        finally:
+            cleanup_step = run_step("delete_tmp_delete_iplist", [str(bin_dir / "workloader_ipl_delete.sh"), str(tmp_href_file)], root, logger)
+            steps.append(cleanup_step)
+            if cleanup_step.rc != 0:
+                logger.warning("Temporary delete-candidate IPList could not be deleted, please clean manually: %s", tmp_name)
+
+        if flow_step_rc != 0:
+            return 1
+
+    for iplist_name, desired in sorted(desired_by_iplist.items()):
+        desired_ips = set(desired["ips"])
+        fqdn_list = sorted(desired["fqdns"])
         description = f"Last seen at : {today}"
+
         if iplist_name in existing:
-            old_ips = sorted(set(filter(None, existing[iplist_name]["include"].split(";"))))
-            old_fqdns = sorted(set(filter(None, existing[iplist_name]["fqdns"].split(";"))))
+            old_ips = parse_semicolon_set(existing[iplist_name]["include"])
+            old_fqdns_set = parse_semicolon_set(existing[iplist_name]["fqdns"])
+            merged_fqdns_set = old_fqdns_set | set(fqdn_list)
+            merged_fqdns = sorted(merged_fqdns_set)
+            old_fqdns = sorted(old_fqdns_set)
+            kept_dns = set()
+            kept_flow = set()
+
+            for ip in sorted(old_ips - desired_ips):
+                fqdn_matches = [fqdn for fqdn in merged_fqdns if ip in resolve_fqdn_ips(fqdn, logger)]
+                if fqdn_matches:
+                    desired_ips.add(ip)
+                    kept_dns.add(ip)
+                    continue
+                if ip in flow_seen_ips_in_candidates:
+                    desired_ips.add(ip)
+                    kept_flow.add(ip)
+
+            include = ";".join(sorted(desired_ips))
             update_rows.append(
                 {
                     "href": existing[iplist_name]["href"],
                     "description": description,
                     "include": include,
-                    "fqdns": ";".join(fqdn_list),
+                    "fqdns": ";".join(merged_fqdns),
                 }
             )
-            if set(old_fqdns) != set(fqdn_list) or set(old_ips) != set(ips):
+
+            if kept_dns:
+                kept_by_dns_for_report.append({"name": iplist_name, "ips": sorted(kept_dns)})
+            if kept_flow:
+                kept_by_flow_for_report.append({"name": iplist_name, "ips": sorted(kept_flow)})
+
+            if old_fqdns_set != merged_fqdns_set or old_ips != desired_ips:
                 updated_for_report.append(
                     {
                         "name": iplist_name,
                         "old_fqdns": old_fqdns,
-                        "new_fqdns": fqdn_list,
-                        "old_ips": old_ips,
-                        "new_ips": sorted(ips),
+                        "new_fqdns": merged_fqdns,
+                        "old_ips": sorted(old_ips),
+                        "new_ips": sorted(desired_ips),
                     }
                 )
         else:
+            include = ";".join(sorted(desired_ips))
             create_rows.append({"name": iplist_name, "description": description, "include": include, "fqdns": ";".join(fqdn_list)})
-            created_for_report.append({"name": iplist_name, "fqdns": fqdn_list, "ips": sorted(ips)})
+            created_for_report.append({"name": iplist_name, "fqdns": fqdn_list, "ips": sorted(desired_ips)})
 
         current_state[iplist_name] = {
             "name": iplist_name,
             "description": description,
-            "include": include,
-            "fqdns": ";".join(fqdn_list),
+            "include": ";".join(sorted(desired_ips)),
+            "fqdns": ";".join(merged_fqdns) if iplist_name in existing else ";".join(fqdn_list),
             "href": existing.get(iplist_name, {}).get("href", ""),
         }
 
@@ -685,6 +813,8 @@ def main() -> int:
         ]
         for i in stale
     ]
+    kept_dns_rows_html = [[html.escape(i["name"]), html_escape_join(i["ips"])] for i in kept_by_dns_for_report]
+    kept_flow_rows_html = [[html.escape(i["name"]), html_escape_join(i["ips"])] for i in kept_by_flow_for_report]
 
     script_name = Path(__file__).name
     vm_hostname = socket.gethostname()
@@ -708,6 +838,18 @@ def main() -> int:
             ["IPList name", "fqdns", "IP Adresses", "Last seen at"],
             stale_rows_html,
         )
+        + "<br/>"
+        + build_table_html(
+            "Table 4 : IP(s) kept because still resolved by DNS",
+            ["IPList name", "IP Adresses"],
+            kept_dns_rows_html,
+        )
+        + "<br/>"
+        + build_table_html(
+            "Table 5 : IP(s) kept because still present in destination flows",
+            ["IPList name", "IP Adresses"],
+            kept_flow_rows_html,
+        )
         + f"<br/><p style='font-family:Arial,sans-serif'><strong>Sent by FQDN IPList Batch<br/>{html.escape(script_name)} / running from {html.escape(vm_hostname)}</strong></p>"
         + "</div>"
     )
@@ -725,6 +867,12 @@ def main() -> int:
         "",
         "FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks):",
         *(f"- {i['name']} | {i['fqdns']} | {i['include']} | {i['last_seen']}" for i in stale),
+        "",
+        "IP(s) kept because still resolved by DNS:",
+        *(f"- {i['name']} | ips={';'.join(i['ips'])}" for i in kept_by_dns_for_report),
+        "",
+        "IP(s) kept because still present in destination flows:",
+        *(f"- {i['name']} | ips={';'.join(i['ips'])}" for i in kept_by_flow_for_report),
         "",
         "Sent by FQDN IPList Batch",
         f"{script_name} / running from {vm_hostname}",
