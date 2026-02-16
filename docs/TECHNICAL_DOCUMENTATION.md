@@ -29,26 +29,28 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 7. Parse existing DNA_* IPLists only (`name starts with DNA_`).
 8. Build a grouping-key/IP map from the filtered flow. Grouping key uses explicit patterns for some domains (for example `sgmonitoring.dev`, `sgmonitoring.prd`, `kafka.dev`, `kafka.prd`, `api.<second-label>`) and falls back to short-FQDN.
 9. For each FQDN containing a configured availability-zone token (default: `eu-fr-paris`, `eu-fr-north`, `hk-hongkong`, `sg-singapore`), generate sibling FQDNs for the other zones, resolve them through DNS, and merge all discovered FQDNs/IPs into the same target IPList.
-10. Create:
+10. Enforce global IP uniqueness across DNA IPLists: each IP is assigned to one owner IPList only. Owner selection is deterministic with this priority: existing historical owner (if any), then environment priority (`prd/prod`, `preprod/ppd`, `uat`, `dev`), then higher FQDN count, then alphabetical order.
+11. Create:
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
    - `update.iplist.existing.fqdns.csv` with `href,description,include,fqdns`.
-11. For delete candidates (`existing IPs - desired IPs`), create a temporary IPList named `_tmp_ip.to.delete_<timestamp>-IPL` and export outbound flows on a configurable lookback (default 60 days) using `--incl-dst-file` built from that temporary IPList href.
-12. When updating an existing DNA_* IPList, FQDNs are append-only: existing FQDNs are preserved and only newly discovered FQDNs are added (no automatic FQDN removal).
-13. When updating each DNA_* IPList, keep a candidate IP if either:
+12. For delete candidates (`existing IPs - desired IPs`), create a temporary IPList named `_tmp_ip.to.delete_<timestamp>-IPL` and export outbound flows on a configurable lookback (default 60 days) using `--incl-dst-file` built from that temporary IPList href.
+13. When updating an existing DNA_* IPList, FQDNs are append-only: existing FQDNs are preserved and only newly discovered FQDNs are added (no automatic FQDN removal).
+14. When updating each DNA_* IPList, keep a candidate IP if either:
    - it still resolves from one of the target FQDNs, or
    - it is still present in the 60-day destination flow export.
    Remove only IPs that satisfy neither condition.
-14. Import create/update CSVs using `workloader_ipl_import.sh`.
-15. Build report sections:
+15. Import create/update CSVs using `workloader_ipl_import.sh`.
+16. Build report sections:
    - Execution status with response code and timestamps.
    - Created and updated DNA IPLists (added/removed IPs).
    - Deletion candidates with `Last seen at` older than 3 weeks.
-   - IP addresses present in multiple DNA IPLists.
-16. Send report by email using SMTP settings from `global.conf`.
+   - IP(s) reassigned to enforce global uniqueness.
+17. Send report by email using SMTP settings from `global.conf`.
 
 ## 4. Safety controls
 - Strict scope: only `DNA_` prefixed IPLists are read/updated.
 - Similar FQDNs sharing the same short-FQDN are grouped into one IPList (example: `ocs-compile.eur-fr-paris...` and `ocs-compile.eur-as-hk...` -> `DNA_ocs-compile-IPL`).
+- Global uniqueness enforcement ensures one IP appears in only one `DNA_*` IPList at the end of each run.
 - Wave label selectors are configurable from `global.conf` (types, prefix/value lists, negation `!`, and `all`).
 - Flow query window is configurable (`NUMBER_OF_DAYS_AGO`).
 

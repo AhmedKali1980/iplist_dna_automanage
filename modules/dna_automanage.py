@@ -244,6 +244,63 @@ def parse_semicolon_set(raw: str) -> Set[str]:
     return {v.strip() for v in (raw or "").split(";") if v.strip()}
 
 
+def env_rank(name: str) -> int:
+    lowered = (name or "").lower()
+    if "prd" in lowered or "prod" in lowered:
+        return 0
+    if "preprod" in lowered or "ppd" in lowered:
+        return 1
+    if "uat" in lowered:
+        return 2
+    if "dev" in lowered:
+        return 3
+    return 4
+
+
+def choose_ip_owner(candidates: List[str], existing_owner: str | None, fqdns_by_iplist: Dict[str, Set[str]]) -> str:
+    if existing_owner and existing_owner in candidates:
+        return existing_owner
+
+    # Deterministic fallback:
+    # 1) Environment priority (prd > preprod > uat > dev > unknown)
+    # 2) More discovered FQDNs first
+    # 3) Alphabetical order
+    ranked = sorted(candidates, key=lambda name: (env_rank(name), -len(fqdns_by_iplist.get(name, set())), name))
+    return ranked[0]
+
+
+def enforce_unique_ips_across_iplists(
+    desired_by_iplist: Dict[str, Dict[str, Set[str]]],
+    existing_owner_by_ip: Dict[str, str],
+) -> tuple[Dict[str, Dict[str, Set[str]]], List[Dict[str, str]]]:
+    fqdns_by_iplist = {name: payload.get("fqdns", set()) for name, payload in desired_by_iplist.items()}
+
+    ip_to_candidates: Dict[str, List[str]] = defaultdict(list)
+    for iplist_name, payload in desired_by_iplist.items():
+        for ip in payload.get("ips", set()):
+            ip_to_candidates[ip].append(iplist_name)
+
+    reassigned: List[Dict[str, str]] = []
+    new_desired: Dict[str, Dict[str, Set[str]]] = {
+        name: {"ips": set(payload.get("ips", set())), "fqdns": set(payload.get("fqdns", set()))}
+        for name, payload in desired_by_iplist.items()
+    }
+
+    for ip, candidates in ip_to_candidates.items():
+        if len(candidates) <= 1:
+            continue
+
+        owner = choose_ip_owner(candidates, existing_owner_by_ip.get(ip), fqdns_by_iplist)
+        for candidate in candidates:
+            if candidate == owner:
+                continue
+            if ip in new_desired[candidate]["ips"]:
+                new_desired[candidate]["ips"].remove(ip)
+                reassigned.append({"ip": ip, "owner": owner, "removed_from": candidate})
+
+    return new_desired, sorted(reassigned, key=lambda r: (r["ip"], r["removed_from"], r["owner"]))
+
+
 def collect_flow_ips(rows: List[Dict[str, str]]) -> Set[str]:
     ips: Set[str] = set()
     for row in rows:
@@ -595,6 +652,7 @@ def main() -> int:
     create_rows, update_rows = [], []
     created_for_report, updated_for_report = [], []
     kept_by_dns_for_report, kept_by_flow_for_report = [], []
+    reassigned_for_report: List[Dict[str, str]] = []
     current_state = {k: dict(v) for k, v in existing.items()}
 
     desired_by_iplist: Dict[str, Dict[str, Set[str]]] = {}
@@ -604,6 +662,13 @@ def main() -> int:
             "ips": set(ips),
             "fqdns": set(fqdns_by_group_key[group_key]),
         }
+
+    existing_owner_by_ip: Dict[str, str] = {}
+    for iplist_name in sorted(existing):
+        for ip in parse_semicolon_set(existing[iplist_name]["include"]):
+            existing_owner_by_ip.setdefault(ip, iplist_name)
+
+    desired_by_iplist, reassigned_ips = enforce_unique_ips_across_iplists(desired_by_iplist, existing_owner_by_ip)
 
     candidate_ips_to_delete: Set[str] = set()
     for iplist_name, old in existing.items():
@@ -685,6 +750,8 @@ def main() -> int:
 
         if flow_step_rc != 0:
             return 1
+
+    reassigned_for_report.extend(reassigned_ips)
 
     for iplist_name, desired in sorted(desired_by_iplist.items()):
         desired_ips = set(desired["ips"])
@@ -815,6 +882,14 @@ def main() -> int:
     ]
     kept_dns_rows_html = [[html.escape(i["name"]), html_escape_join(i["ips"])] for i in kept_by_dns_for_report]
     kept_flow_rows_html = [[html.escape(i["name"]), html_escape_join(i["ips"])] for i in kept_by_flow_for_report]
+    reassigned_rows_html = [
+        [
+            html.escape(i["ip"]),
+            html.escape(i["owner"]),
+            html.escape(i["removed_from"]),
+        ]
+        for i in reassigned_for_report
+    ]
 
     script_name = Path(__file__).name
     vm_hostname = socket.gethostname()
@@ -850,6 +925,12 @@ def main() -> int:
             ["IPList name", "IP Adresses"],
             kept_flow_rows_html,
         )
+        + "<br/>"
+        + build_table_html(
+            "Table 6 : IP(s) reassigned to enforce global uniqueness",
+            ["IP", "Owner IPList", "Removed from IPList"],
+            reassigned_rows_html,
+        )
         + f"<br/><p style='font-family:Arial,sans-serif'><strong>Sent by FQDN IPList Batch<br/>{html.escape(script_name)} / running from {html.escape(vm_hostname)}</strong></p>"
         + "</div>"
     )
@@ -873,6 +954,9 @@ def main() -> int:
         "",
         "IP(s) kept because still present in destination flows:",
         *(f"- {i['name']} | ips={';'.join(i['ips'])}" for i in kept_by_flow_for_report),
+        "",
+        "IP(s) reassigned to enforce global uniqueness:",
+        *(f"- {i['ip']} | owner={i['owner']} | removed_from={i['removed_from']}" for i in reassigned_for_report),
         "",
         "Sent by FQDN IPList Batch",
         f"{script_name} / running from {vm_hostname}",
