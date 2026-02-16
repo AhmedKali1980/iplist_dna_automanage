@@ -33,17 +33,18 @@ This repository automates lifecycle management of Illumio IPLists that **must st
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
    - `update.iplist.existing.fqdns.csv` with `href,description,include,fqdns`.
 11. For delete candidates (`existing IPs - desired IPs`), create a temporary IPList named `_tmp_ip.to.delete_<timestamp>-IPL` and export outbound flows on a configurable lookback (default 60 days) using `--incl-dst-file` built from that temporary IPList href.
-12. When updating each DNA_* IPList, keep a candidate IP if either:
+12. When updating an existing DNA_* IPList, FQDNs are append-only: existing FQDNs are preserved and only newly discovered FQDNs are added (no automatic FQDN removal).
+13. When updating each DNA_* IPList, keep a candidate IP if either:
    - it still resolves from one of the target FQDNs, or
    - it is still present in the 60-day destination flow export.
    Remove only IPs that satisfy neither condition.
-13. Import create/update CSVs using `workloader_ipl_import.sh`.
-14. Build report sections:
+14. Import create/update CSVs using `workloader_ipl_import.sh`.
+15. Build report sections:
    - Execution status with response code and timestamps.
    - Created and updated DNA IPLists (added/removed IPs).
    - Deletion candidates with `Last seen at` older than 3 weeks.
    - IP addresses present in multiple DNA IPLists.
-15. Send report by email using SMTP settings from `global.conf`.
+16. Send report by email using SMTP settings from `global.conf`.
 
 ## 4. Safety controls
 - Strict scope: only `DNA_` prefixed IPLists are read/updated.

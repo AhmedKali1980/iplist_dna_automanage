@@ -693,12 +693,15 @@ def main() -> int:
 
         if iplist_name in existing:
             old_ips = parse_semicolon_set(existing[iplist_name]["include"])
-            old_fqdns = sorted(parse_semicolon_set(existing[iplist_name]["fqdns"]))
+            old_fqdns_set = parse_semicolon_set(existing[iplist_name]["fqdns"])
+            merged_fqdns_set = old_fqdns_set | set(fqdn_list)
+            merged_fqdns = sorted(merged_fqdns_set)
+            old_fqdns = sorted(old_fqdns_set)
             kept_dns = set()
             kept_flow = set()
 
             for ip in sorted(old_ips - desired_ips):
-                fqdn_matches = [fqdn for fqdn in fqdn_list if ip in resolve_fqdn_ips(fqdn, logger)]
+                fqdn_matches = [fqdn for fqdn in merged_fqdns if ip in resolve_fqdn_ips(fqdn, logger)]
                 if fqdn_matches:
                     desired_ips.add(ip)
                     kept_dns.add(ip)
@@ -713,7 +716,7 @@ def main() -> int:
                     "href": existing[iplist_name]["href"],
                     "description": description,
                     "include": include,
-                    "fqdns": ";".join(fqdn_list),
+                    "fqdns": ";".join(merged_fqdns),
                 }
             )
 
@@ -722,12 +725,12 @@ def main() -> int:
             if kept_flow:
                 kept_by_flow_for_report.append({"name": iplist_name, "ips": sorted(kept_flow)})
 
-            if set(old_fqdns) != set(fqdn_list) or old_ips != desired_ips:
+            if old_fqdns_set != merged_fqdns_set or old_ips != desired_ips:
                 updated_for_report.append(
                     {
                         "name": iplist_name,
                         "old_fqdns": old_fqdns,
-                        "new_fqdns": fqdn_list,
+                        "new_fqdns": merged_fqdns,
                         "old_ips": sorted(old_ips),
                         "new_ips": sorted(desired_ips),
                     }
@@ -741,7 +744,7 @@ def main() -> int:
             "name": iplist_name,
             "description": description,
             "include": ";".join(sorted(desired_ips)),
-            "fqdns": ";".join(fqdn_list),
+            "fqdns": ";".join(merged_fqdns) if iplist_name in existing else ";".join(fqdn_list),
             "href": existing.get(iplist_name, {}).get("href", ""),
         }
 
