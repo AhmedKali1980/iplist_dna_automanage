@@ -1,0 +1,4 @@
+name,description,include,fqdns,href
+DNA_api.account-IPL,Last seen at : 2024-01-15,203.0.113.10;198.51.100.77,api.account.cloud.socgen,/orgs/1/sec_policy/draft/ip_lists/1
+DNA_sgmonitoring.prd-IPL,Last seen at : 2024-01-10,192.0.2.10,1682f82444010702bb8f5584609300ea.ece.sgmonitoring.prd.euw.gbis.sg-azure.com,/orgs/1/sec_policy/draft/ip_lists/2
+OTHER_LIST,manual,10.10.10.10,,/orgs/1/sec_policy/draft/ip_lists/99

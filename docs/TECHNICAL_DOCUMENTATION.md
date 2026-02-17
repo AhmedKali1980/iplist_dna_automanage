@@ -64,6 +64,7 @@ Edit `conf/global.conf`:
 - Regional expansion parameters (`AVAILABILITY_ZONES`, `DNS_LOOKUP_TIMEOUT_SEC`).
 - Stale threshold days.
 - Temporary delete-candidate control (`FLOW_DELETE_VERIFICATION_DAYS`).
+- Local stub mode (`USE_STUB_DATA`, `STUB_DATA_DIR`) to bypass PCE/workloader exports while keeping end-to-end processing.
 
 ## 6. Outputs per run
 Under `RUNS/<timestamp>/`:
