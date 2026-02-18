@@ -51,6 +51,22 @@ def read_conf(path: Path) -> Dict[str, str]:
     return conf
 
 
+def parse_bool(value: str) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def stub_step(name: str, details: str = "") -> StepResult:
+    now = dt.datetime.now()
+    return StepResult(name=name, started_at=now, ended_at=now, rc=0, details=details)
+
+
+def copy_stub_csv(stub_root: Path, output_path: Path, filename: str) -> None:
+    src = stub_root / filename
+    if not src.exists():
+        raise FileNotFoundError(f"Missing stub file: {src}")
+    output_path.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def run_step(name: str, cmd: List[str], cwd: Path, logger: logging.Logger) -> StepResult:
     started = dt.datetime.now()
     try:
@@ -470,6 +486,10 @@ def main() -> int:
     conf_path = Path(args.config).resolve()
     conf = read_conf(conf_path)
 
+    use_stub_data = parse_bool(conf.get("USE_STUB_DATA", "false"))
+    stub_data_dir = conf.get("STUB_DATA_DIR", "")
+    stub_root = Path(stub_data_dir).resolve() if stub_data_dir else (root / "stub_data")
+
     now = dt.datetime.now()
     run_dir = (root / conf.get("EXPORT_ROOT", "./RUNS") / now.strftime(conf.get("DATE_FMT", "%Y%m%d-%H%M%S"))).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -481,6 +501,12 @@ def main() -> int:
         handlers=[logging.FileHandler(execution_log, encoding="utf-8"), logging.StreamHandler()],
     )
     logger = logging.getLogger("dna_automanage")
+
+    if use_stub_data:
+        logger.info("Stub mode enabled (USE_STUB_DATA=true). Reading fixtures from %s", stub_root)
+        if not stub_root.exists() or not stub_root.is_dir():
+            logger.error("Stub data directory not found: %s", stub_root)
+            return 1
 
     steps: List[StepResult] = []
     bin_dir = root / "bin"
@@ -500,7 +526,20 @@ def main() -> int:
         ("export_labels", [str(bin_dir / "workloader_label_export.sh"), str(export_label)]),
         ("export_labelgroups", [str(bin_dir / "workloader_labelgroup.sh"), str(export_labelgroup)]),
     ]:
-        step = run_step(name, cmd, root, logger)
+        if use_stub_data:
+            stub_name = {
+                "export_iplists": "export_iplists.csv",
+                "export_labels": "export_label.csv",
+                "export_labelgroups": "export_labelgroup.csv",
+            }[name]
+            try:
+                copy_stub_csv(stub_root, expected_exports[name], stub_name)
+                step = stub_step(name, f"stub copied from {stub_root / stub_name}")
+            except FileNotFoundError as exc:
+                logger.error("%s", exc)
+                return 1
+        else:
+            step = run_step(name, cmd, root, logger)
         steps.append(step)
         if step.rc != 0:
             return 1
@@ -576,21 +615,30 @@ def main() -> int:
         write_href_file(excl_src_file, excl_src_hrefs)
         write_href_file(excl_dst_file, excl_dst_hrefs)
 
-        step = run_step(
-            f"export_traffic_{wave}",
-            [
-                str(bin_dir / "workloader_traffic_out.sh"),
-                str(incl_src_file),
-                str(excl_src_file),
-                str(excl_dst_file),
-                str(run_dir / "service.exlude.csv"),
-                start_date,
-                end_date,
-                str(wave_flow_file),
-            ],
-            root,
-            logger,
-        )
+        if use_stub_data:
+            stub_name = f"flow-out-fqdn-{wave}.csv"
+            try:
+                copy_stub_csv(stub_root, wave_flow_file, stub_name)
+                step = stub_step(f"export_traffic_{wave}", f"stub copied from {stub_root / stub_name}")
+            except FileNotFoundError as exc:
+                logger.error("%s", exc)
+                return 1
+        else:
+            step = run_step(
+                f"export_traffic_{wave}",
+                [
+                    str(bin_dir / "workloader_traffic_out.sh"),
+                    str(incl_src_file),
+                    str(excl_src_file),
+                    str(excl_dst_file),
+                    str(run_dir / "service.exlude.csv"),
+                    start_date,
+                    end_date,
+                    str(wave_flow_file),
+                ],
+                root,
+                logger,
+            )
         steps.append(step)
         if step.rc != 0:
             return 1
@@ -680,78 +728,93 @@ def main() -> int:
 
     flow_seen_ips_in_candidates: Set[str] = set()
     if candidate_ips_to_delete:
-        tmp_name = f"_tmp_ip.to.delete_{timestamp}-IPL"
-        tmp_create_csv = run_dir / "new.iplist.tmp.egress.to.delete.csv"
-        tmp_href_file = run_dir / "href_tmp.egress.to.delete.csv"
-        href_ips_to_delete_csv = run_dir / "href_ips.to.delete.csv"
         flow_out_delete_candidates = run_dir / f"flow-out-dst-delete-candidates-{timestamp}.csv"
 
-        tmp_payload = {
-            "description": f"Temporary candidate IP list generated at {now.isoformat(timespec='seconds')}",
-            "include": ";".join(sorted(candidate_ips_to_delete)),
-            "fqdns": "",
-        }
+        if use_stub_data:
+            stub_name = "flow-out-dst-delete-candidates.csv"
+            try:
+                copy_stub_csv(stub_root, flow_out_delete_candidates, stub_name)
+                steps.append(stub_step("export_traffic_delete_candidates", f"stub copied from {stub_root / stub_name}"))
+            except FileNotFoundError:
+                flow_out_delete_candidates.write_text("", encoding="utf-8")
+                steps.append(stub_step("export_traffic_delete_candidates", "stub file not provided, assuming no delete-candidate flows"))
 
-        with tmp_create_csv.open("w", encoding="utf-8", newline="") as f:
-            wr = csv.DictWriter(f, fieldnames=["name", "description", "include", "fqdns"])
-            wr.writeheader()
-            wr.writerow({"name": tmp_name, **tmp_payload})
-        step = run_step("create_tmp_delete_iplist", [str(bin_dir / "workloader_ipl_import.sh"), str(tmp_create_csv)], root, logger)
-        steps.append(step)
-        if step.rc != 0:
-            return 1
-
-        tmp_export_csv = run_dir / "export_iplists.with.tmp.csv"
-        step = run_step("export_iplists_for_tmp_href", [str(bin_dir / "workloader_ipl_export.sh"), str(tmp_export_csv)], root, logger)
-        steps.append(step)
-        if step.rc != 0:
-            return 1
-
-        tmp_rows = csv_rows(tmp_export_csv)
-        tmp_href = ""
-        for row in tmp_rows:
-            if choose(row, "name", "Name") == tmp_name:
-                tmp_href = choose(row, "href", "Href")
-                break
-
-        if not tmp_href:
-            logger.error("Temporary IPList %s href not found after export", tmp_name)
-            return 1
-
-        tmp_href_file.write_text(tmp_href + "\n", encoding="utf-8")
-        href_ips_to_delete_csv.write_text(tmp_href + "\n", encoding="utf-8")
-
-        flow_days = int(conf.get("FLOW_DELETE_VERIFICATION_DAYS", "60"))
-        flow_start = (now.date() - dt.timedelta(days=flow_days)).isoformat()
-        flow_end = now.date().isoformat()
-
-        flow_step_rc = 0
-        try:
-            step = run_step(
-                "export_traffic_delete_candidates",
-                [
-                    str(bin_dir / "workloader_traffic_out_dst.sh"),
-                    str(href_ips_to_delete_csv),
-                    flow_start,
-                    flow_end,
-                    str(flow_out_delete_candidates),
-                ],
-                root,
-                logger,
-            )
-            steps.append(step)
-            flow_step_rc = step.rc
-
-            if flow_step_rc == 0 and flow_out_delete_candidates.exists() and flow_out_delete_candidates.stat().st_size > 0:
+            if flow_out_delete_candidates.exists() and flow_out_delete_candidates.stat().st_size > 0:
                 flow_seen_ips_in_candidates = collect_flow_ips(csv_rows(flow_out_delete_candidates))
-        finally:
-            cleanup_step = run_step("delete_tmp_delete_iplist", [str(bin_dir / "workloader_ipl_delete.sh"), str(tmp_href_file)], root, logger)
-            steps.append(cleanup_step)
-            if cleanup_step.rc != 0:
-                logger.warning("Temporary delete-candidate IPList could not be deleted, please clean manually: %s", tmp_name)
+        else:
+            tmp_name = f"_tmp_ip.to.delete_{timestamp}-IPL"
+            tmp_create_csv = run_dir / "new.iplist.tmp.egress.to.delete.csv"
+            tmp_href_file = run_dir / "href_tmp.egress.to.delete.csv"
+            href_ips_to_delete_csv = run_dir / "href_ips.to.delete.csv"
 
-        if flow_step_rc != 0:
-            return 1
+            tmp_payload = {
+                "description": f"Temporary candidate IP list generated at {now.isoformat(timespec='seconds')}",
+                "include": ";".join(sorted(candidate_ips_to_delete)),
+                "fqdns": "",
+            }
+
+            with tmp_create_csv.open("w", encoding="utf-8", newline="") as f:
+                wr = csv.DictWriter(f, fieldnames=["name", "description", "include", "fqdns"])
+                wr.writeheader()
+                wr.writerow({"name": tmp_name, **tmp_payload})
+            step = run_step("create_tmp_delete_iplist", [str(bin_dir / "workloader_ipl_import.sh"), str(tmp_create_csv)], root, logger)
+            steps.append(step)
+            if step.rc != 0:
+                return 1
+
+            tmp_export_csv = run_dir / "export_iplists.with.tmp.csv"
+            step = run_step("export_iplists_for_tmp_href", [str(bin_dir / "workloader_ipl_export.sh"), str(tmp_export_csv)], root, logger)
+            steps.append(step)
+            if step.rc != 0:
+                return 1
+
+            tmp_rows = csv_rows(tmp_export_csv)
+            tmp_href = ""
+            for row in tmp_rows:
+                if choose(row, "name", "Name") == tmp_name:
+                    tmp_href = choose(row, "href", "Href")
+                    break
+
+            if not tmp_href:
+                logger.error("Temporary IPList %s href not found after export", tmp_name)
+                return 1
+
+            tmp_href_file.write_text(tmp_href + "\n", encoding="utf-8")
+            href_ips_to_delete_csv.write_text(tmp_href + "\n", encoding="utf-8")
+
+            flow_days = int(conf.get("FLOW_DELETE_VERIFICATION_DAYS", "60"))
+            flow_start = (now.date() - dt.timedelta(days=flow_days)).isoformat()
+            flow_end = now.date().isoformat()
+
+            flow_step_rc = 0
+            try:
+                step = run_step(
+                    "export_traffic_delete_candidates",
+                    [
+                        str(bin_dir / "workloader_traffic_out_dst.sh"),
+                        str(href_ips_to_delete_csv),
+                        flow_start,
+                        flow_end,
+                        str(flow_out_delete_candidates),
+                    ],
+                    root,
+                    logger,
+                )
+                steps.append(step)
+                flow_step_rc = step.rc
+
+                if flow_step_rc == 0 and flow_out_delete_candidates.exists() and flow_out_delete_candidates.stat().st_size > 0:
+                    flow_seen_ips_in_candidates = collect_flow_ips(csv_rows(flow_out_delete_candidates))
+            finally:
+                cleanup_step = run_step("delete_tmp_delete_iplist", [str(bin_dir / "workloader_ipl_delete.sh"), str(tmp_href_file)], root, logger)
+                steps.append(cleanup_step)
+                if cleanup_step.rc != 0:
+                    logger.warning("Temporary delete-candidate IPList could not be deleted, please clean manually: %s", tmp_name)
+
+            if flow_step_rc != 0:
+                return 1
+
+    reassigned_for_report.extend(reassigned_ips)
 
     merged_for_report.extend(regroup_events)
 
@@ -832,7 +895,10 @@ def main() -> int:
 
     for name, path in [("import_new_iplists", create_csv), ("update_existing_iplists", update_csv)]:
         if sum(1 for _ in path.open("r", encoding="utf-8")) > 1:
-            steps.append(run_step(name, [str(bin_dir / "workloader_ipl_import.sh"), str(path)], root, logger))
+            if use_stub_data:
+                steps.append(stub_step(name, f"stub mode: skipped workloader import for {path.name}"))
+            else:
+                steps.append(run_step(name, [str(bin_dir / "workloader_ipl_import.sh"), str(path)], root, logger))
 
     stale_threshold = int(conf.get("STALE_LAST_SEEN_DAYS", "21"))
     stale = []
