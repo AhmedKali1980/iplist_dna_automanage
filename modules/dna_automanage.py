@@ -718,6 +718,8 @@ def main() -> int:
     created_for_report, updated_for_report = [], []
     kept_by_dns_for_report, kept_by_flow_for_report = [], []
     merged_for_report: List[Dict[str, str]] = []
+    # Backward-compatible aliases in case partial deployments still reference previous names.
+    reassigned_for_report = merged_for_report
     current_state = {k: dict(v) for k, v in existing.items()}
 
     desired_by_group_key: Dict[str, Dict[str, Set[str]]] = {}
@@ -728,6 +730,7 @@ def main() -> int:
         }
 
     desired_by_iplist, regroup_events = regroup_by_exact_ips_with_bridge_fqdn(desired_by_group_key)
+    reassigned_ips = regroup_events
 
     candidate_ips_to_delete: Set[str] = set()
     for iplist_name, old in existing.items():
@@ -824,6 +827,8 @@ def main() -> int:
                 return 1
 
     reassigned_for_report.extend(reassigned_ips)
+
+    merged_for_report.extend(regroup_events)
 
     merged_for_report.extend(regroup_events)
 
