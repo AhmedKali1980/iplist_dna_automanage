@@ -1,6 +1,6 @@
 import unittest
 
-from modules.dna_automanage import group_key_for_fqdn, merge_iplist_candidates_by_shared_ips
+from modules.dna_automanage import group_key_for_fqdn, regroup_by_exact_ips_with_bridge_fqdn
 
 
 class TestGroupingRules(unittest.TestCase):
@@ -37,7 +37,7 @@ class TestGroupingRules(unittest.TestCase):
         self.assertEqual(group_key_for_fqdn("api.slb.sg-singapore.cloud.socgen"), "api.slb")
 
 
-class TestMergeBySharedIps(unittest.TestCase):
+class TestRegroupByExactIps(unittest.TestCase):
     def test_shared_ip_candidates_are_merged_into_one_iplist(self):
         desired = {
             "DNA_pkumar2-IPL": {"ips": {"184.5.2.10"}, "fqdns": {"pkumar2.fr.world.socgen"}},
@@ -45,35 +45,37 @@ class TestMergeBySharedIps(unittest.TestCase):
             "DNA_sbreux-IPL": {"ips": {"184.5.2.10"}, "fqdns": {"sbreux.fr.world.socgen"}},
         }
 
-        merged, events = merge_iplist_candidates_by_shared_ips(desired, existing={})
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired)
 
-        self.assertEqual(set(merged.keys()), {"DNA_pkumar2-IPL"})
-        self.assertEqual(merged["DNA_pkumar2-IPL"]["ips"], {"184.5.2.10"})
+        self.assertEqual(set(regrouped.keys()), {"DNA_pkumar2-IPL"})
+        self.assertEqual(regrouped["DNA_pkumar2-IPL"]["ips"], {"184.5.2.10"})
         self.assertEqual(
-            merged["DNA_pkumar2-IPL"]["fqdns"],
+            regrouped["DNA_pkumar2-IPL"]["fqdns"],
             {"pkumar2.fr.world.socgen", "sawasthi.fr.world.socgen", "sbreux.fr.world.socgen"},
         )
         self.assertEqual(len(events), 1)
 
-    def test_existing_name_is_preferred_as_merge_target(self):
+    def test_bridge_fqdn_is_used_for_target_name(self):
         desired = {
-            "DNA_new-alpha-IPL": {"ips": {"10.1.1.1", "10.1.1.2"}, "fqdns": {"alpha.example"}},
-            "DNA_existing-beta-IPL": {"ips": {"10.1.1.2"}, "fqdns": {"beta.example"}},
-        }
-        existing = {
-            "DNA_existing-beta-IPL": {
-                "name": "DNA_existing-beta-IPL",
-                "description": "",
-                "include": "10.1.1.2",
-                "fqdns": "beta.example",
-                "href": "/orgs/1/sec_policy/draft/ip_lists/1",
-            }
+            "groupA": {"ips": {"10.1.1.1", "10.1.1.2"}, "fqdns": {"zzz.example", "aaa.example"}},
+            "groupB": {"ips": {"10.1.1.1", "10.1.1.2"}, "fqdns": {"bbb.example"}},
         }
 
-        merged, _ = merge_iplist_candidates_by_shared_ips(desired, existing=existing)
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired)
 
-        self.assertEqual(set(merged.keys()), {"DNA_existing-beta-IPL"})
-        self.assertEqual(merged["DNA_existing-beta-IPL"]["ips"], {"10.1.1.1", "10.1.1.2"})
+        self.assertEqual(set(regrouped.keys()), {"DNA_aaa-IPL"})
+        self.assertEqual(regrouped["DNA_aaa-IPL"]["ips"], {"10.1.1.1", "10.1.1.2"})
+        self.assertEqual(events[0]["bridge_fqdn"], "aaa.example")
+
+    def test_empty_ip_groups_are_ignored(self):
+        desired = {
+            "groupA": {"ips": set(), "fqdns": {"empty.example"}},
+        }
+
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired)
+
+        self.assertEqual(regrouped, {})
+        self.assertEqual(events, [])
 
 
 

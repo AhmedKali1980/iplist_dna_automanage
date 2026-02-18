@@ -244,73 +244,69 @@ def parse_semicolon_set(raw: str) -> Set[str]:
     return {v.strip() for v in (raw or "").split(";") if v.strip()}
 
 
-def merge_iplist_candidates_by_shared_ips(
-    desired_by_iplist: Dict[str, Dict[str, Set[str]]],
-    existing: Dict[str, Dict[str, str]],
+def regroup_by_exact_ips_with_bridge_fqdn(
+    desired_by_group_key: Dict[str, Dict[str, Set[str]]],
 ) -> tuple[Dict[str, Dict[str, Set[str]]], List[Dict[str, str]]]:
-    parent = {name: name for name in desired_by_iplist}
+    """Regroup candidates by exact IP set and choose a bridge FQDN for naming.
 
-    def find(name: str) -> str:
-        while parent[name] != name:
-            parent[name] = parent[parent[name]]
-            name = parent[name]
-        return name
+    - Every group with the same exact sorted IP signature is merged together.
+    - The bridge FQDN is the alphabetically first FQDN among merged members.
+    - Final IPList name is built from the bridge short FQDN (`DNA_<short>-IPL`).
+    - Empty-IP signatures are ignored to prevent empty IPList creation.
+    """
 
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            if ra < rb:
-                parent[rb] = ra
-            else:
-                parent[ra] = rb
+    signature_to_payload: Dict[tuple[str, ...], Dict[str, Set[str]]] = {}
+    signature_to_sources: Dict[tuple[str, ...], Set[str]] = defaultdict(set)
 
-    ip_to_names: Dict[str, List[str]] = defaultdict(list)
-    for name, payload in desired_by_iplist.items():
-        for ip in payload.get("ips", set()):
-            ip_to_names[ip].append(name)
-
-    for names in ip_to_names.values():
-        if len(names) <= 1:
-            continue
-        first = names[0]
-        for other in names[1:]:
-            union(first, other)
-
-    components: Dict[str, Set[str]] = defaultdict(set)
-    for name in desired_by_iplist:
-        components[find(name)].add(name)
-
-    merged: Dict[str, Dict[str, Set[str]]] = {}
-    merge_events: List[Dict[str, str]] = []
-
-    for _, members in sorted(components.items(), key=lambda item: sorted(item[1])[0]):
-        combined_ips: Set[str] = set()
-        combined_fqdns: Set[str] = set()
-        for member in members:
-            combined_ips.update(desired_by_iplist[member].get("ips", set()))
-            combined_fqdns.update(desired_by_iplist[member].get("fqdns", set()))
-
-        if not combined_ips:
+    for source_key, payload in desired_by_group_key.items():
+        ips = set(payload.get("ips", set()))
+        if not ips:
             continue
 
-        existing_members = sorted(m for m in members if m in existing)
-        canonical_name = existing_members[0] if existing_members else sorted(members)[0]
+        signature = tuple(sorted(ips))
+        if signature not in signature_to_payload:
+            signature_to_payload[signature] = {"ips": set(), "fqdns": set()}
 
-        merged[canonical_name] = {
-            "ips": combined_ips,
-            "fqdns": combined_fqdns,
+        signature_to_payload[signature]["ips"].update(ips)
+        signature_to_payload[signature]["fqdns"].update(payload.get("fqdns", set()))
+        signature_to_sources[signature].add(source_key)
+
+    desired_by_iplist: Dict[str, Dict[str, Set[str]]] = {}
+    regroup_events: List[Dict[str, str]] = []
+    used_names: Set[str] = set()
+
+    for signature in sorted(signature_to_payload.keys()):
+        payload = signature_to_payload[signature]
+        merged_fqdns = sorted(payload["fqdns"])
+        if not merged_fqdns:
+            continue
+
+        bridge_fqdn = merged_fqdns[0]
+        base_name = sanitize_name(short_fqdn(bridge_fqdn))
+
+        candidate_name = base_name
+        suffix = 2
+        while candidate_name in used_names:
+            candidate_name = sanitize_name(f"{short_fqdn(bridge_fqdn)}-{suffix}")
+            suffix += 1
+
+        used_names.add(candidate_name)
+        desired_by_iplist[candidate_name] = {
+            "ips": set(payload["ips"]),
+            "fqdns": set(payload["fqdns"]),
         }
 
-        if len(members) > 1:
-            merge_events.append(
-                {
-                    "target": canonical_name,
-                    "sources": ";".join(sorted(members)),
-                    "ips": ";".join(sorted(combined_ips)),
-                }
-            )
+        sources = sorted(signature_to_sources[signature])
+        regroup_events.append(
+            {
+                "target": candidate_name,
+                "bridge_fqdn": bridge_fqdn,
+                "sources": ";".join(sources),
+                "ips": ";".join(signature),
+            }
+        )
 
-    return merged, merge_events
+    return desired_by_iplist, regroup_events
 
 
 def collect_flow_ips(rows: List[Dict[str, str]]) -> Set[str]:
@@ -667,15 +663,14 @@ def main() -> int:
     merged_for_report: List[Dict[str, str]] = []
     current_state = {k: dict(v) for k, v in existing.items()}
 
-    desired_by_iplist: Dict[str, Dict[str, Set[str]]] = {}
+    desired_by_group_key: Dict[str, Dict[str, Set[str]]] = {}
     for group_key, ips in sorted(ips_by_group_key.items()):
-        iplist_name = sanitize_name(group_key)
-        desired_by_iplist[iplist_name] = {
+        desired_by_group_key[group_key] = {
             "ips": set(ips),
             "fqdns": set(fqdns_by_group_key[group_key]),
         }
 
-    desired_by_iplist, merge_events = merge_iplist_candidates_by_shared_ips(desired_by_iplist, existing)
+    desired_by_iplist, regroup_events = regroup_by_exact_ips_with_bridge_fqdn(desired_by_group_key)
 
     candidate_ips_to_delete: Set[str] = set()
     for iplist_name, old in existing.items():
@@ -758,7 +753,7 @@ def main() -> int:
         if flow_step_rc != 0:
             return 1
 
-    merged_for_report.extend(merge_events)
+    merged_for_report.extend(regroup_events)
 
     for iplist_name, desired in sorted(desired_by_iplist.items()):
         desired_ips = set(desired["ips"])
@@ -894,6 +889,7 @@ def main() -> int:
     merged_rows_html = [
         [
             html.escape(i["target"]),
+            html.escape(i["bridge_fqdn"]),
             html_escape_join(sorted(filter(None, i["sources"].split(";")))),
             html_escape_join(sorted(filter(None, i["ips"].split(";")))),
         ]
@@ -936,8 +932,8 @@ def main() -> int:
         )
         + "<br/>"
         + build_table_html(
-            "Table 6 : IPList merge(s) due to shared IPs",
-            ["Target IPList", "Merged source IPLists", "Shared IPs"],
+            "Table 6 : IPList regrouping by identical IP set",
+            ["Target IPList", "Bridge FQDN", "Merged source groups", "Shared IPs"],
             merged_rows_html,
         )
         + f"<br/><p style='font-family:Arial,sans-serif'><strong>Sent by FQDN IPList Batch<br/>{html.escape(script_name)} / running from {html.escape(vm_hostname)}</strong></p>"
@@ -964,8 +960,8 @@ def main() -> int:
         "IP(s) kept because still present in destination flows:",
         *(f"- {i['name']} | ips={';'.join(i['ips'])}" for i in kept_by_flow_for_report),
         "",
-        "IPList merge(s) due to shared IPs:",
-        *(f"- target={i['target']} | sources={i['sources']} | ips={i['ips']}" for i in merged_for_report),
+        "IPList regrouping by identical IP set:",
+        *(f"- target={i['target']} | bridge_fqdn={i['bridge_fqdn']} | sources={i['sources']} | ips={i['ips']}" for i in merged_for_report),
         "",
         "Sent by FQDN IPList Batch",
         f"{script_name} / running from {vm_hostname}",
