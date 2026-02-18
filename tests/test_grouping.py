@@ -1,6 +1,6 @@
 import unittest
 
-from modules.dna_automanage import group_key_for_fqdn, regroup_by_exact_ips_with_bridge_fqdn
+from modules.dna_automanage import drop_rows_without_destination_fqdn, filter_flow_rows, group_key_for_fqdn, regroup_by_exact_ips_with_bridge_fqdn
 
 
 class TestGroupingRules(unittest.TestCase):
@@ -77,6 +77,24 @@ class TestRegroupByExactIps(unittest.TestCase):
         self.assertEqual(regrouped, {})
         self.assertEqual(events, [])
 
+
+
+class TestNullSafeCsvFallbacks(unittest.TestCase):
+    def test_drop_rows_without_destination_fqdn_handles_none_values(self):
+        rows = [{f"col{i}": "" for i in range(26)}]
+        rows[0]["col25"] = None
+
+        kept = drop_rows_without_destination_fqdn(rows)
+
+        self.assertEqual(kept, [])
+
+    def test_filter_flow_rows_handles_none_values(self):
+        rows = [{f"col{i}": "" for i in range(26)}]
+        rows[0]["col25"] = None
+
+        filtered = filter_flow_rows(rows)
+
+        self.assertEqual(filtered, [])
 
 
 if __name__ == "__main__":

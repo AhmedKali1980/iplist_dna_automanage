@@ -103,6 +103,15 @@ def choose(row: Dict[str, str], *keys: str, default: str = "") -> str:
     return default
 
 
+def value_at(values: List[object], index: int) -> str:
+    if index >= len(values):
+        return ""
+    value = values[index]
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def sanitize_name(fqdn: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9-]", ".", fqdn)
     return f"DNA_{safe}-IPL"
@@ -204,7 +213,7 @@ def drop_rows_without_destination_fqdn(flow_rows: List[Dict[str, str]]) -> List[
     kept: List[Dict[str, str]] = []
     for row in flow_rows:
         vals = list(row.values())
-        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
+        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=value_at(vals, 25))
         if fqdn:
             kept.append(row)
     return kept
@@ -249,7 +258,7 @@ def filter_flow_rows(flow_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     filtered_flow: List[Dict[str, str]] = []
     for row in flow_rows:
         vals = list(row.values())
-        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=vals[25].strip() if len(vals) > 25 else "")
+        fqdn = choose(row, "Destination FQDN", "destination_fqdn", default=value_at(vals, 25))
         if not fqdn or ".compute." in fqdn or is_ip_style_fqdn(fqdn):
             continue
         filtered_flow.append(row)
@@ -329,7 +338,7 @@ def collect_flow_ips(rows: List[Dict[str, str]]) -> Set[str]:
     ips: Set[str] = set()
     for row in rows:
         vals = list(row.values())
-        dst_ip = choose(row, "Destination IP", "destination_ip", default=vals[14].strip() if len(vals) > 14 else "")
+        dst_ip = choose(row, "Destination IP", "destination_ip", default=value_at(vals, 14))
         if dst_ip:
             ips.add(dst_ip)
     return ips
@@ -689,8 +698,8 @@ def main() -> int:
     fqdns_by_group_key: Dict[str, Set[str]] = defaultdict(set)
     for r in filtered_flow:
         vals = list(r.values())
-        fqdn = choose(r, "Destination FQDN", default=vals[25].strip() if len(vals) > 25 else "")
-        ip = choose(r, "Destination IP", default=vals[14].strip() if len(vals) > 14 else "")
+        fqdn = choose(r, "Destination FQDN", default=value_at(vals, 25))
+        ip = choose(r, "Destination IP", default=value_at(vals, 14))
         group_key = group_key_for_fqdn(fqdn)
         if fqdn and ip and group_key:
             ips_by_group_key[group_key].add(ip)
@@ -815,6 +824,8 @@ def main() -> int:
                 return 1
 
     reassigned_for_report.extend(reassigned_ips)
+
+    merged_for_report.extend(regroup_events)
 
     merged_for_report.extend(regroup_events)
 
