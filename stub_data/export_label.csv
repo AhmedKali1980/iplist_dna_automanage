@@ -1,0 +1,7 @@
+key,value,href
+app,APM_TEST,/orgs/1/labels/1
+app,CSM_CORE,/orgs/1/labels/2
+env,PRD,/orgs/1/labels/3
+env,DEV,/orgs/1/labels/4
+role,ROLE1,/orgs/1/labels/5
+location,PARIS,/orgs/1/labels/6
