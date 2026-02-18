@@ -29,7 +29,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 7. Parse existing DNA_* IPLists only (`name starts with DNA_`).
 8. Build a grouping-key/IP map from the filtered flow. Grouping key uses explicit patterns for some domains (for example `sgmonitoring.dev`, `sgmonitoring.prd`, `kafka.dev`, `kafka.prd`, `api.<second-label>`) and falls back to short-FQDN.
 9. For each FQDN containing a configured availability-zone token (default: `eu-fr-paris`, `eu-fr-north`, `hk-hongkong`, `sg-singapore`), generate sibling FQDNs for the other zones, resolve them through DNS, and merge all discovered FQDNs/IPs into the same target IPList.
-10. Enforce global IP uniqueness across DNA IPLists: each IP is assigned to one owner IPList only. Owner selection is deterministic with this priority: existing historical owner (if any), then environment priority (`prd/prod`, `preprod/ppd`, `uat`, `dev`), then higher FQDN count, then alphabetical order.
+10. Enforce global grouping by exact IP set: all candidates with the same sorted IP list are merged into one target. Target name is derived from a deterministic bridge FQDN (alphabetically first FQDN, using its short host: `DNA_<short>-IPL`).
 11. Create:
    - `new.iplist.new.fqdns.csv` with `name,description,include,fqdns`.
    - `update.iplist.existing.fqdns.csv` with `href,description,include,fqdns`.
@@ -44,13 +44,13 @@ This repository automates lifecycle management of Illumio IPLists that **must st
    - Execution status with response code and timestamps.
    - Created and updated DNA IPLists (added/removed IPs).
    - Deletion candidates with `Last seen at` older than 3 weeks.
-   - IP(s) reassigned to enforce global uniqueness.
+   - IPList regrouping events by identical IP set (including bridge FQDN used for naming).
 17. Send report by email using SMTP settings from `global.conf`.
 
 ## 4. Safety controls
 - Strict scope: only `DNA_` prefixed IPLists are read/updated.
 - Similar FQDNs sharing the same short-FQDN are grouped into one IPList (example: `ocs-compile.eur-fr-paris...` and `ocs-compile.eur-as-hk...` -> `DNA_ocs-compile-IPL`).
-- Global uniqueness enforcement ensures one IP appears in only one `DNA_*` IPList at the end of each run.
+- Exact-IP-set regrouping ensures FQDNs resolving to the same IP set are consolidated in one `DNA_*` IPList.
 - Wave label selectors are configurable from `global.conf` (types, prefix/value lists, negation `!`, and `all`).
 - Flow query window is configurable (`NUMBER_OF_DAYS_AGO`).
 
