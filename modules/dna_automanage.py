@@ -13,8 +13,10 @@ import datetime as dt
 import html
 import logging
 import re
+import shutil
 import socket
 import subprocess
+import tarfile
 import xml.sax.saxutils as saxutils
 import zipfile
 from collections import defaultdict
@@ -486,6 +488,27 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
         zf.writestr("xl/styles.xml", styles_xml)
 
 
+def archive_older_run_dirs(export_root: Path, logger: logging.Logger) -> None:
+    run_dirs = [p for p in export_root.iterdir() if p.is_dir()]
+    if len(run_dirs) <= 1:
+        return
+
+    latest_dir = max(run_dirs, key=lambda p: (p.stat().st_mtime, p.name))
+
+    for run_dir in run_dirs:
+        if run_dir == latest_dir:
+            continue
+
+        archive_path = export_root / f"{run_dir.name}.tar.gz"
+        try:
+            with tarfile.open(archive_path, "w:gz") as tar:
+                tar.add(run_dir, arcname=run_dir.name)
+            shutil.rmtree(run_dir)
+            logger.info("Archived old run directory %s -> %s", run_dir, archive_path)
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            logger.error("Failed to archive old run directory %s: %s", run_dir, exc)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -945,7 +968,7 @@ def main() -> int:
             }
         )
 
-    excel_path = run_dir / "DNA_IPLists_After_Run.xlsx"
+    excel_path = run_dir / f"DNA_IPLists_After_Run_{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
     build_excel(all_dna_rows, excel_path)
 
     created_rows_html = [[html.escape(i["name"]), html_escape_join(i["fqdns"]), html_escape_join(i["ips"])] for i in created_for_report]
@@ -1063,6 +1086,9 @@ def main() -> int:
         )
     else:
         logger.warning("Email not sent (MAIL_TO/SMTP_SERVER not configured).")
+
+    export_root = run_dir.parent
+    archive_older_run_dirs(export_root, logger)
 
     return 0
 
