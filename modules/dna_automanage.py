@@ -124,6 +124,22 @@ def short_fqdn(fqdn: str) -> str:
     return host
 
 
+def normalize_az_variant_fqdn(fqdn: str, az_tokens: List[str]) -> str:
+    normalized = (fqdn or "").strip().lower().strip(".")
+    for token in az_tokens:
+        token_l = token.lower()
+        normalized = normalized.replace(token_l, "{az}")
+    return normalized
+
+
+def use_short_name_for_az_variants(fqdns: List[str], az_tokens: List[str]) -> bool:
+    if len(fqdns) <= 1:
+        return False
+
+    normalized = {normalize_az_variant_fqdn(fqdn, az_tokens) for fqdn in fqdns if fqdn}
+    return len(normalized) == 1
+
+
 def group_key_for_fqdn(fqdn: str) -> str:
     fqdn_l = (fqdn or "").strip().lower().strip(".")
     if not fqdn_l:
@@ -273,12 +289,14 @@ def parse_semicolon_set(raw: str) -> Set[str]:
 
 def regroup_by_exact_ips_with_bridge_fqdn(
     desired_by_group_key: Dict[str, Dict[str, Set[str]]],
+    az_tokens: List[str],
 ) -> tuple[Dict[str, Dict[str, Set[str]]], List[Dict[str, str]]]:
     """Regroup candidates by exact IP set and choose a bridge FQDN for naming.
 
     - Every group with the same exact sorted IP signature is merged together.
     - The bridge FQDN is the alphabetically first FQDN among merged members.
-    - Final IPList name is built from the bridge short FQDN (`DNA_<short>-IPL`).
+    - Final IPList name is built from bridge full FQDN (`DNA_<fqdn>-IPL`).
+    - Exception: if merged FQDNs only differ by configured AZ tokens, use bridge short FQDN.
     - Empty-IP signatures are ignored to prevent empty IPList creation.
     """
 
@@ -309,12 +327,17 @@ def regroup_by_exact_ips_with_bridge_fqdn(
             continue
 
         bridge_fqdn = merged_fqdns[0]
-        base_name = sanitize_name(short_fqdn(bridge_fqdn))
+        if use_short_name_for_az_variants(merged_fqdns, az_tokens):
+            base_name_seed = short_fqdn(bridge_fqdn)
+        else:
+            base_name_seed = bridge_fqdn
+
+        base_name = sanitize_name(base_name_seed)
 
         candidate_name = base_name
         suffix = 2
         while candidate_name in used_names:
-            candidate_name = sanitize_name(f"{short_fqdn(bridge_fqdn)}-{suffix}")
+            candidate_name = sanitize_name(f"{base_name_seed}-{suffix}")
             suffix += 1
 
         used_names.add(candidate_name)
@@ -752,7 +775,7 @@ def main() -> int:
             "fqdns": set(fqdns_by_group_key[group_key]),
         }
 
-    desired_by_iplist, regroup_events = regroup_by_exact_ips_with_bridge_fqdn(desired_by_group_key)
+    desired_by_iplist, regroup_events = regroup_by_exact_ips_with_bridge_fqdn(desired_by_group_key, az_tokens)
     reassigned_ips = regroup_events
 
     candidate_ips_to_delete: Set[str] = set()
@@ -968,7 +991,7 @@ def main() -> int:
             }
         )
 
-    excel_path = run_dir / f"DNA_IPLists_After_Run_{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
+    excel_path = run_dir / f"dna_iplists_after_run_{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
     build_excel(all_dna_rows, excel_path)
 
     created_rows_html = [[html.escape(i["name"]), html_escape_join(i["fqdns"]), html_escape_join(i["ips"])] for i in created_for_report]
