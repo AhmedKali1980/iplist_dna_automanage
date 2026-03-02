@@ -9,10 +9,15 @@ Automation project to maintain DNA_* IPLists from outbound FQDN traffic.
    ```bash
    ./bin/cron_job.sh ./conf/global.conf
    ```
-3. Add cron entry:
+3. Configure cron for 04:00 daily:
    ```cron
-   15 2 * * * /path/to/iplist_dna_automanage/bin/cron_job.sh /path/to/iplist_dna_automanage/conf/global.conf
+   0 4 * * * cd /path/to/iplist_dna_automanage && /path/to/iplist_dna_automanage/bin/cron_job.sh /path/to/iplist_dna_automanage/conf/global.conf
    ```
+
+`cron_job.sh` now:
+- loads the Python virtualenv defined by `VENV_ACTIVATE_REL` (default `../venv/bin/activate`),
+- writes shell/workloader output into `workloader.log` during runtime,
+- then moves `workloader.log` into the latest run folder `RUNS/<YYYYmmdd-HHMMSS>/workloader.log` at the end of the job.
 
 All run artifacts are generated under `RUNS/<YYYYmmdd-HHMMSS>/`.
 

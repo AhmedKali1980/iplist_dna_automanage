@@ -43,6 +43,33 @@ load_conf() {
 
 load_conf
 
+VENV_ACTIVATE_REL="${VENV_ACTIVATE_REL:-../venv/bin/activate}"
+if [[ "${VENV_ACTIVATE_REL}" = /* ]]; then
+  VENV_ACTIVATE_PATH="${VENV_ACTIVATE_REL}"
+else
+  VENV_ACTIVATE_PATH="$(cd "${ROOT_DIR}" && realpath "${VENV_ACTIVATE_REL}")"
+fi
+
+if [[ ! -f "${VENV_ACTIVATE_PATH}" ]]; then
+  echo "ERROR: python virtualenv activation script not found at ${VENV_ACTIVATE_PATH}" >&2
+  exit 2
+fi
+
+# shellcheck disable=SC1090
+source "${VENV_ACTIVATE_PATH}"
+
+export_root_conf="${EXPORT_ROOT:-./RUNS}"
+if [[ "${export_root_conf}" = /* ]]; then
+  export_root_path="${export_root_conf}"
+else
+  export_root_path="$(cd "${ROOT_DIR}" && realpath "${export_root_conf}")"
+fi
+mkdir -p "${export_root_path}"
+
+WORKLOADER_LOG="${ROOT_DIR}/workloader.log"
+exec >>"${WORKLOADER_LOG}" 2>&1
+echo "$(date '+%F %T') INFO cron_job started"
+
 export GLOBAL_CONF_PATH="${CONF_FILE}"
 export EXECUTABLE="${EXECUTABLE:?Missing EXECUTABLE in global.conf}"
 export CFG="${EXECUTABLE_CONFIG_FILE:?Missing EXECUTABLE_CONFIG_FILE in global.conf}"
@@ -56,3 +83,12 @@ export TIMEOUT_SEC="${TIMEOUT_SEC:-2700}"
 export MAX_ATTEMPTS="${RETRY_MAX_ATTEMPTS:-5}"
 
 python3 "${ROOT_DIR}/modules/dna_automanage.py" --config "${CONF_FILE}"
+
+run_dir="$(find "${export_root_path}" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' | sort | tail -n 1)"
+if [[ -n "${run_dir}" ]]; then
+  destination_log="${export_root_path}/${run_dir}/workloader.log"
+  mv -f "${WORKLOADER_LOG}" "${destination_log}"
+  echo "$(date '+%F %T') INFO moved workloader.log to ${destination_log}"
+else
+  echo "$(date '+%F %T') WARNING no run directory found under ${export_root_path}; keeping ${WORKLOADER_LOG}"
+fi
