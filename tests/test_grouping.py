@@ -45,12 +45,12 @@ class TestRegroupByExactIps(unittest.TestCase):
             "DNA_sbreux-IPL": {"ips": {"184.5.2.10"}, "fqdns": {"sbreux.fr.world.socgen"}},
         }
 
-        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired)
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired, ["eu-fr-paris", "eu-fr-north", "hk-hongkong", "sg-singapore"])
 
-        self.assertEqual(set(regrouped.keys()), {"DNA_pkumar2-IPL"})
-        self.assertEqual(regrouped["DNA_pkumar2-IPL"]["ips"], {"184.5.2.10"})
+        self.assertEqual(set(regrouped.keys()), {"DNA_pkumar2.fr.world.socgen-IPL"})
+        self.assertEqual(regrouped["DNA_pkumar2.fr.world.socgen-IPL"]["ips"], {"184.5.2.10"})
         self.assertEqual(
-            regrouped["DNA_pkumar2-IPL"]["fqdns"],
+            regrouped["DNA_pkumar2.fr.world.socgen-IPL"]["fqdns"],
             {"pkumar2.fr.world.socgen", "sawasthi.fr.world.socgen", "sbreux.fr.world.socgen"},
         )
         self.assertEqual(len(events), 1)
@@ -61,18 +61,38 @@ class TestRegroupByExactIps(unittest.TestCase):
             "groupB": {"ips": {"10.1.1.1", "10.1.1.2"}, "fqdns": {"bbb.example"}},
         }
 
-        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired)
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired, ["eu-fr-paris", "eu-fr-north", "hk-hongkong", "sg-singapore"])
 
-        self.assertEqual(set(regrouped.keys()), {"DNA_aaa-IPL"})
-        self.assertEqual(regrouped["DNA_aaa-IPL"]["ips"], {"10.1.1.1", "10.1.1.2"})
+        self.assertEqual(set(regrouped.keys()), {"DNA_aaa.example-IPL"})
+        self.assertEqual(regrouped["DNA_aaa.example-IPL"]["ips"], {"10.1.1.1", "10.1.1.2"})
         self.assertEqual(events[0]["bridge_fqdn"], "aaa.example")
+
+
+    def test_az_variants_use_short_name(self):
+        desired = {
+            "groupA": {
+                "ips": {"10.2.2.1"},
+                "fqdns": {
+                    "api.slb.eu-fr-paris.cloud.socgen",
+                    "api.slb.eu-fr-north.cloud.socgen",
+                },
+            },
+        }
+
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(
+            desired,
+            ["eu-fr-paris", "eu-fr-north", "hk-hongkong", "sg-singapore"],
+        )
+
+        self.assertEqual(set(regrouped.keys()), {"DNA_api-IPL"})
+        self.assertEqual(events[0]["bridge_fqdn"], "api.slb.eu-fr-north.cloud.socgen")
 
     def test_empty_ip_groups_are_ignored(self):
         desired = {
             "groupA": {"ips": set(), "fqdns": {"empty.example"}},
         }
 
-        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired)
+        regrouped, events = regroup_by_exact_ips_with_bridge_fqdn(desired, ["eu-fr-paris", "eu-fr-north", "hk-hongkong", "sg-singapore"])
 
         self.assertEqual(regrouped, {})
         self.assertEqual(events, [])
