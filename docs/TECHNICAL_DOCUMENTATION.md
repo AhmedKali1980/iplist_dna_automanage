@@ -4,7 +4,7 @@
 This repository automates lifecycle management of Illumio IPLists that **must start with `DNA_`**. It exports labels and traffic, computes FQDN deltas, imports new/updated IPLists, and sends an English report by email.
 
 ## 2. Repository structure
-- `bin/cron_job.sh`: cron entrypoint.
+- `bin/cron_job.sh`: cron entrypoint (loads config, activates venv, runs orchestration, rotates `workloader.log` into run folder).
 - `bin/workloader_common.sh`: shared retry/backoff + command assembly.
 - `bin/workloader_ipl_export.sh`: exports IPLists.
 - `bin/workloader_label_export.sh`: exports labels.
@@ -46,6 +46,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
    - Deletion candidates with `Last seen at` older than 3 weeks.
    - IPList regrouping events by identical IP set (including bridge FQDN used for naming).
 17. Send report by email using SMTP settings from `global.conf`.
+18. Move `workloader.log` into the created `RUNS/<timestamp>/` folder at end of run, so each execution keeps its own workloader trace and the root log file is reset for next run.
 
 ## 4. Safety controls
 - Strict scope: only `DNA_` prefixed IPLists are read/updated.
@@ -57,6 +58,7 @@ This repository automates lifecycle management of Illumio IPLists that **must st
 ## 5. Parameters to customize
 Edit `conf/global.conf`:
 - Workloader binary/config paths.
+- Virtualenv activation path (`VENV_ACTIVATE_REL`, default `../venv/bin/activate`).
 - SMTP and recipients (`MAIL_TO`).
 - Retry policy.
 - Prefix filters.
@@ -72,7 +74,7 @@ Under `RUNS/<timestamp>/`:
 - Derived filters (`href_labels.include.src.wave*.csv`, `href_labels.exclude.src.wave*.csv`, `href_labels.exclude.dst.wave*.csv`, `service.exlude.csv`).
 - Wave and merged flows (`flow-out-fqdn-wave*.csv`, `flow-out-fqdn-*.csv`).
 - Import payloads (`new...csv`, `update...csv`).
-- `execution.log` and `report.txt`.
+- `execution.log`, `execution_report.log`, generated Excel report, and `workloader.log`.
 
 ## 7. DOCX generation
 To avoid PR errors on platforms that reject binary files, the `.docx` is generated locally from the Markdown source:
@@ -82,3 +84,26 @@ python3 docs/build_docx.py
 ```
 
 This command creates `docs/TECHNICAL_DOCUMENTATION.docx`.
+
+
+## 8. Cron setup (Linux)
+1. Validate `conf/global.conf`:
+   - `EXECUTABLE` and `EXECUTABLE_CONFIG_FILE` must be absolute paths.
+   - `VENV_ACTIVATE_REL` must target the activation script reachable from repository root.
+2. Run a manual dry run from repo root:
+   ```bash
+   ./bin/cron_job.sh ./conf/global.conf
+   ```
+3. Edit crontab for the execution user:
+   ```bash
+   crontab -e
+   ```
+4. Add a daily 04:00 entry:
+   ```cron
+   0 4 * * * cd /DATA/mco/illumio-mco/iplist_dna_automanage && /DATA/mco/illumio-mco/iplist_dna_automanage/bin/cron_job.sh /DATA/mco/illumio-mco/iplist_dna_automanage/conf/global.conf
+   ```
+5. Verify registration:
+   ```bash
+   crontab -l
+   ```
+6. After first scheduled run, validate artifacts in `RUNS/<timestamp>/` including `workloader.log`.
