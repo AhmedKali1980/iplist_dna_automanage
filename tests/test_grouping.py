@@ -1,6 +1,12 @@
 import unittest
 
-from modules.dna_automanage import drop_rows_without_destination_fqdn, filter_flow_rows, group_key_for_fqdn, regroup_by_exact_ips_with_bridge_fqdn
+from modules.dna_automanage import (
+    drop_rows_without_destination_fqdn,
+    filter_flow_rows,
+    find_ips_in_multiple_dna_iplists,
+    group_key_for_fqdn,
+    regroup_by_exact_ips_with_bridge_fqdn,
+)
 
 
 class TestGroupingRules(unittest.TestCase):
@@ -67,6 +73,17 @@ class TestRegroupByExactIps(unittest.TestCase):
         self.assertEqual(regrouped["DNA_aaa.example-IPL"]["ips"], {"10.1.1.1", "10.1.1.2"})
         self.assertEqual(events[0]["bridge_fqdn"], "aaa.example")
 
+    def test_overlapping_ip_sets_are_merged_into_single_target(self):
+        desired = {
+            "groupA": {"ips": {"10.1.1.1", "10.1.1.2"}, "fqdns": {"a.example"}},
+            "groupB": {"ips": {"10.1.1.2", "10.1.1.3"}, "fqdns": {"b.example"}},
+        }
+
+        regrouped, _ = regroup_by_exact_ips_with_bridge_fqdn(desired, ["eu-fr-paris", "eu-fr-north", "hk-hongkong", "sg-singapore"])
+
+        self.assertEqual(set(regrouped.keys()), {"DNA_a.example-IPL"})
+        self.assertEqual(regrouped["DNA_a.example-IPL"]["ips"], {"10.1.1.1", "10.1.1.2", "10.1.1.3"})
+
 
     def test_az_variants_use_short_name(self):
         desired = {
@@ -115,6 +132,25 @@ class TestNullSafeCsvFallbacks(unittest.TestCase):
         filtered = filter_flow_rows(rows)
 
         self.assertEqual(filtered, [])
+
+
+class TestDuplicateIpsReport(unittest.TestCase):
+    def test_find_ips_in_multiple_dna_iplists(self):
+        state = {
+            "DNA_a-IPL": {"include": "192.0.2.1;192.0.2.2"},
+            "DNA_b-IPL": {"include": "192.0.2.2;192.0.2.3"},
+            "DNA_c-IPL": {"include": "192.0.2.3"},
+        }
+
+        result = find_ips_in_multiple_dna_iplists(state)
+
+        self.assertEqual(
+            result,
+            [
+                {"ip": "192.0.2.2", "iplists": ["DNA_a-IPL", "DNA_b-IPL"]},
+                {"ip": "192.0.2.3", "iplists": ["DNA_b-IPL", "DNA_c-IPL"]},
+            ],
+        )
 
 
 if __name__ == "__main__":
