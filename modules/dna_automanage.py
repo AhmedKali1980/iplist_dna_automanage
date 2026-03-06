@@ -294,37 +294,63 @@ def regroup_by_exact_ips_with_bridge_fqdn(
     desired_by_group_key: Dict[str, Dict[str, Set[str]]],
     az_tokens: List[str],
 ) -> tuple[Dict[str, Dict[str, Set[str]]], List[Dict[str, str]]]:
-    """Regroup candidates by exact IP set and choose a bridge FQDN for naming.
+    """Regroup candidates by overlapping IPs and choose a bridge FQDN for naming.
 
-    - Every group with the same exact sorted IP signature is merged together.
+    - Every group sharing at least one IP is merged in the same connected component.
+    - This guarantees an IP appears in one and only one managed target IPList.
     - The bridge FQDN is the alphabetically first FQDN among merged members.
     - Final IPList name is built from bridge full FQDN (`DNA_<fqdn>-IPL`).
     - Exception: if merged FQDNs only differ by configured AZ tokens, use bridge short FQDN.
     - Empty-IP signatures are ignored to prevent empty IPList creation.
     """
 
-    signature_to_payload: Dict[tuple[str, ...], Dict[str, Set[str]]] = {}
-    signature_to_sources: Dict[tuple[str, ...], Set[str]] = defaultdict(set)
-
+    group_items: List[tuple[str, Set[str], Set[str]]] = []
     for source_key, payload in desired_by_group_key.items():
         ips = set(payload.get("ips", set()))
-        if not ips:
+        if ips:
+            group_items.append((source_key, ips, set(payload.get("fqdns", set()))))
+
+    parent = list(range(len(group_items)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    ip_to_indices: Dict[str, List[int]] = defaultdict(list)
+    for idx, (_, ips, _) in enumerate(group_items):
+        for ip in ips:
+            ip_to_indices[ip].append(idx)
+
+    for indices in ip_to_indices.values():
+        if len(indices) < 2:
             continue
+        first = indices[0]
+        for other in indices[1:]:
+            union(first, other)
 
-        signature = tuple(sorted(ips))
-        if signature not in signature_to_payload:
-            signature_to_payload[signature] = {"ips": set(), "fqdns": set()}
-
-        signature_to_payload[signature]["ips"].update(ips)
-        signature_to_payload[signature]["fqdns"].update(payload.get("fqdns", set()))
-        signature_to_sources[signature].add(source_key)
+    component_payload: Dict[int, Dict[str, Set[str]]] = {}
+    component_sources: Dict[int, Set[str]] = defaultdict(set)
+    for idx, (source_key, ips, fqdns) in enumerate(group_items):
+        root = find(idx)
+        if root not in component_payload:
+            component_payload[root] = {"ips": set(), "fqdns": set()}
+        component_payload[root]["ips"].update(ips)
+        component_payload[root]["fqdns"].update(fqdns)
+        component_sources[root].add(source_key)
 
     desired_by_iplist: Dict[str, Dict[str, Set[str]]] = {}
     regroup_events: List[Dict[str, str]] = []
     used_names: Set[str] = set()
 
-    for signature in sorted(signature_to_payload.keys()):
-        payload = signature_to_payload[signature]
+    for component_id in sorted(component_payload.keys()):
+        payload = component_payload[component_id]
         merged_fqdns = sorted(payload["fqdns"])
         if not merged_fqdns:
             continue
@@ -349,17 +375,30 @@ def regroup_by_exact_ips_with_bridge_fqdn(
             "fqdns": set(payload["fqdns"]),
         }
 
-        sources = sorted(signature_to_sources[signature])
+        sources = sorted(component_sources[component_id])
         regroup_events.append(
             {
                 "target": candidate_name,
                 "bridge_fqdn": bridge_fqdn,
                 "sources": ";".join(sources),
-                "ips": ";".join(signature),
+                "ips": ";".join(sorted(payload["ips"])),
             }
         )
 
     return desired_by_iplist, regroup_events
+
+
+def find_ips_in_multiple_dna_iplists(state: Dict[str, Dict[str, str]]) -> List[Dict[str, object]]:
+    ip_to_iplists: Dict[str, Set[str]] = defaultdict(set)
+    for iplist_name, payload in state.items():
+        for ip in parse_semicolon_set(payload.get("include", "")):
+            ip_to_iplists[ip].add(iplist_name)
+
+    duplicates: List[Dict[str, object]] = []
+    for ip, names in sorted(ip_to_iplists.items()):
+        if len(names) > 1:
+            duplicates.append({"ip": ip, "iplists": sorted(names)})
+    return duplicates
 
 
 def collect_flow_ips(rows: List[Dict[str, str]]) -> Set[str]:
@@ -598,6 +637,7 @@ def main() -> int:
     fatal_errors: List[str] = []
     report_written = {"done": False}
     steps: List[StepResult] = []
+    redundant_iplists_for_manual_deletion: List[Dict[str, str]] = []
 
     def write_execution_report() -> None:
         if report_written["done"]:
@@ -614,7 +654,13 @@ def main() -> int:
                     f.write(err)
                     if not err.endswith("\n"):
                         f.write("\n")
-            f.write("\nSection 3 - Detailed execution log\n")
+            if redundant_iplists_for_manual_deletion:
+                f.write("\nSection 3 - Manual deletion candidates (redundant DNA_ IPLists)\n")
+                for row in redundant_iplists_for_manual_deletion:
+                    f.write(
+                        f"- {row['iplist_name']} | shared_ips={row['shared_ips']} | keep_target_iplists={row['keep_targets']}\n"
+                    )
+            f.write("\nSection 4 - Detailed execution log\n")
             if execution_log.exists():
                 f.write(execution_log.read_text(encoding="utf-8"))
 
@@ -849,6 +895,26 @@ def main() -> int:
     desired_by_iplist, regroup_events = regroup_by_exact_ips_with_bridge_fqdn(desired_by_group_key, az_tokens)
     reassigned_ips = regroup_events
 
+    desired_ip_owners: Dict[str, Set[str]] = defaultdict(set)
+    for name, payload in desired_by_iplist.items():
+        for ip in payload.get("ips", set()):
+            desired_ip_owners[ip].add(name)
+
+    for iplist_name, old in existing.items():
+        if iplist_name in desired_by_iplist:
+            continue
+        shared_ips = sorted(ip for ip in parse_semicolon_set(old["include"]) if ip in desired_ip_owners)
+        if not shared_ips:
+            continue
+        keep_targets = sorted({target for ip in shared_ips for target in desired_ip_owners[ip]})
+        redundant_iplists_for_manual_deletion.append(
+            {
+                "iplist_name": iplist_name,
+                "shared_ips": ";".join(shared_ips),
+                "keep_targets": ";".join(keep_targets),
+            }
+        )
+
     candidate_ips_to_delete: Set[str] = set()
     for iplist_name, old in existing.items():
         old_ips = parse_semicolon_set(old["include"])
@@ -944,11 +1010,6 @@ def main() -> int:
                 return 1
 
     reassigned_for_report.extend(reassigned_ips)
-
-    merged_for_report.extend(regroup_events)
-
-    merged_for_report.extend(regroup_events)
-
     merged_for_report.extend(regroup_events)
 
     for iplist_name, desired in sorted(desired_by_iplist.items()):
@@ -1040,6 +1101,9 @@ def main() -> int:
         if d and (now.date() - d).days > stale_threshold:
             stale.append({"name": v["name"], "fqdns": v["fqdns"], "include": v["include"], "last_seen": d.isoformat(), "href": v["href"]})
 
+    duplicated_ips = find_ips_in_multiple_dna_iplists(current_state)
+    duplicated_ips_rows_excel = [[row["ip"], "\n".join(row["iplists"])] for row in duplicated_ips]
+
     write_execution_report()
 
     created_rows_excel = [[i["name"], "\n".join(i["fqdns"]), "\n".join(i["ips"])] for i in created_for_report]
@@ -1079,6 +1143,7 @@ def main() -> int:
         ["Tab 4", "IP(s) kept because still resolved by DNS", "IPs preserved because at least one managed FQDN still resolves to them.", str(len(kept_dns_rows_excel))],
         ["Tab 5", "IP(s) kept because still present in destination flows", "IPs preserved because they were observed in destination traffic flows.", str(len(kept_flow_rows_excel))],
         ["Tab 6", "IPList regrouping by identical IP set", "Regrouping actions where multiple source groups shared the same exact IP set.", str(len(merged_rows_excel))],
+        ["Tab 7", "IP found in multiple DNA_ iplists", "IP addresses that are still present in more than one managed DNA_ IPList after reconciliation.", str(len(duplicated_ips_rows_excel))],
     ]
 
     summary_rows_excel = [
@@ -1134,6 +1199,12 @@ def main() -> int:
                 "headers": ["Target IPList", "Bridge FQDN", "Merged source groups", "Shared IPs"],
                 "rows": merged_rows_excel,
                 "wrap_cols": {1, 2, 3},
+            },
+            {
+                "name": "IP found in multiple DNA_ iplists",
+                "headers": ["IP Address", "DNA_ IPLists containing this IP"],
+                "rows": duplicated_ips_rows_excel,
+                "wrap_cols": {1},
             },
         ],
         excel_path,
