@@ -417,26 +417,29 @@ def excel_inline_cell(text: str, style: int = 0) -> str:
     return f"<c t='inlineStr' s='{style}'><is><t xml:space='preserve'>{escaped}</t></is></c>"
 
 
-def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
-    headers = ["IPList name", "fqdns", "IP Adresses", "Last seen at", "href"]
+def truncate_sheet_name(name: str) -> str:
+    invalid = {":", "\\", "/", "?", "*", "[", "]"}
+    safe = "".join("_" if ch in invalid else ch for ch in name)
+    return safe[:31] if len(safe) > 31 else safe
 
+
+def build_excel_sheet(headers: List[str], rows: List[List[str]], wrap_cols: Set[int], header_row_indices: Set[int] | None = None) -> str:
     max_chars = [len(h) for h in headers]
     row_xml = []
 
     header_cells = "".join(excel_inline_cell(h, style=1) for h in headers)
     row_xml.append(f"<row r='1'>{header_cells}</row>")
 
-    for row_idx, item in enumerate(rows, start=2):
-        values = [
-            item.get("name", ""),
-            item.get("fqdns", "").replace(";", "; "),
-            item.get("include", "").replace(";", "; "),
-            item.get("last_seen", ""),
-            item.get("href", ""),
-        ]
-        for i, v in enumerate(values):
+    data_header_rows = header_row_indices or set()
+    for row_idx, values in enumerate(rows, start=2):
+        normalized = [v if v is not None else "" for v in values]
+        for i, v in enumerate(normalized):
             max_chars[i] = max(max_chars[i], len(v or ""))
-        cells = "".join(excel_inline_cell(v, style=0) for i, v in enumerate(values))
+        row_style = 1 if row_idx in data_header_rows else None
+        cells = "".join(
+            excel_inline_cell(v, style=row_style if row_style is not None else (2 if i in wrap_cols else 0))
+            for i, v in enumerate(normalized)
+        )
         row_xml.append(f"<row r='{row_idx}'>{cells}</row>")
 
     max_width = 100.0
@@ -445,12 +448,15 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
         width = min(max(float(width_chars) + 2.0, 12.0), max_width)
         cols_xml.append(f"<col min='{i}' max='{i}' width='{width:.2f}' customWidth='1' bestFit='1'/>")
 
-    sheet_xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+    return f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>
   <cols>{''.join(cols_xml)}</cols>
   <sheetData>{''.join(row_xml)}</sheetData>
 </worksheet>
 """
+
+
+def build_excel(sheets: List[Dict[str, object]], output_path: Path) -> None:
 
     styles_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <styleSheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>
@@ -465,17 +471,44 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
   </fills>
   <borders count='1'><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count='1'><xf numFmtId='0' fontId='0' fillId='0' borderId='0'/></cellStyleXfs>
-  <cellXfs count='2'>
+  <cellXfs count='3'>
     <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0' applyAlignment='1'><alignment vertical='top'/></xf>
     <xf numFmtId='0' fontId='1' fillId='2' borderId='0' xfId='0' applyFont='1' applyFill='1' applyAlignment='1'><alignment vertical='center'/></xf>
+    <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0' applyAlignment='1'><alignment vertical='top' wrapText='1'/></xf>
   </cellXfs>
   <cellStyles count='1'><cellStyle name='Normal' xfId='0' builtinId='0'/></cellStyles>
 </styleSheet>
 """
+    workbook_sheets_xml = []
+    workbook_rel_xml = []
+    content_types_overrides = [
+        "<Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/>",
+        "<Override PartName='/xl/styles.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml'/>",
+    ]
+    sheets_payload: List[tuple[str, str]] = []
 
-    workbook_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+    for idx, sheet in enumerate(sheets, start=1):
+        headers = sheet["headers"]
+        rows = sheet["rows"]
+        wrap_cols = sheet.get("wrap_cols", set())
+        header_row_indices = sheet.get("header_row_indices", set())
+        sheet_name = truncate_sheet_name(str(sheet["name"]))
+        sheet_filename = f"sheet{idx}.xml"
+        sheet_xml = build_excel_sheet(headers, rows, set(wrap_cols), set(header_row_indices))
+        sheets_payload.append((sheet_filename, sheet_xml))
+        workbook_sheets_xml.append(f"<sheet name='{saxutils.escape(sheet_name)}' sheetId='{idx}' r:id='rId{idx}'/>")
+        workbook_rel_xml.append(
+            f"<Relationship Id='rId{idx}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/{sheet_filename}'/>"
+        )
+        content_types_overrides.append(
+            f"<Override PartName='/xl/worksheets/{sheet_filename}' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'/>"
+        )
+
+    styles_rel_id = len(sheets) + 1
+
+    workbook_xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
-  <sheets><sheet name='DNA_IPLists' sheetId='1' r:id='rId1'/></sheets>
+  <sheets>{''.join(workbook_sheets_xml)}</sheets>
 </workbook>
 """
 
@@ -485,20 +518,18 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
 </Relationships>
 """
 
-    workbook_rels_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+    workbook_rels_xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>
-  <Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet1.xml'/>
-  <Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles' Target='styles.xml'/>
+  {''.join(workbook_rel_xml)}
+  <Relationship Id='rId{styles_rel_id}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles' Target='styles.xml'/>
 </Relationships>
 """
 
-    content_types_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+    content_types_xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>
   <Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>
   <Default Extension='xml' ContentType='application/xml'/>
-  <Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/>
-  <Override PartName='/xl/worksheets/sheet1.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'/>
-  <Override PartName='/xl/styles.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml'/>
+  {''.join(content_types_overrides)}
 </Types>
 """
 
@@ -507,7 +538,8 @@ def build_excel(rows: List[Dict[str, str]], output_path: Path) -> None:
         zf.writestr("_rels/.rels", rels_xml)
         zf.writestr("xl/workbook.xml", workbook_xml)
         zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
-        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        for sheet_filename, sheet_xml in sheets_payload:
+            zf.writestr(f"xl/worksheets/{sheet_filename}", sheet_xml)
         zf.writestr("xl/styles.xml", styles_xml)
 
 
@@ -978,51 +1010,102 @@ def main() -> int:
         if execution_log.exists():
             f.write(execution_log.read_text(encoding="utf-8"))
 
-    all_dna_rows = []
-    for v in sorted(current_state.values(), key=lambda x: x["name"]):
-        d = parse_last_seen(v["description"])
-        all_dna_rows.append(
-            {
-                "name": v["name"],
-                "fqdns": v["fqdns"],
-                "include": v["include"],
-                "last_seen": d.isoformat() if d else "",
-                "href": v.get("href", ""),
-            }
-        )
-
-    excel_path = run_dir / f"dna_iplists_after_run_{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
-    build_excel(all_dna_rows, excel_path)
-
-    created_rows_html = [[html.escape(i["name"]), html_escape_join(i["fqdns"]), html_escape_join(i["ips"])] for i in created_for_report]
-    updated_rows_html = [
+    created_rows_excel = [[i["name"], "\n".join(i["fqdns"]), "\n".join(i["ips"])] for i in created_for_report]
+    updated_rows_excel = [
         [
-            html.escape(i["name"]),
-            fmt_delta(i["old_fqdns"], i["new_fqdns"]),
-            fmt_delta(i["old_ips"], i["new_ips"]),
+            i["name"],
+            "\n".join(i["new_fqdns"]),
+            "\n".join(i["new_ips"]),
         ]
         for i in updated_for_report
     ]
-    stale_rows_html = [
+    stale_rows_excel = [
         [
-            html.escape(i["name"]),
-            html_escape_join(sorted(filter(None, i["fqdns"].split(";")))),
-            html_escape_join(sorted(filter(None, i["include"].split(";")))),
-            html.escape(i["last_seen"]),
+            i["name"],
+            "\n".join(sorted(filter(None, i["fqdns"].split(";")))),
+            "\n".join(sorted(filter(None, i["include"].split(";")))),
+            i["last_seen"],
         ]
         for i in stale
     ]
-    kept_dns_rows_html = [[html.escape(i["name"]), html_escape_join(i["ips"])] for i in kept_by_dns_for_report]
-    kept_flow_rows_html = [[html.escape(i["name"]), html_escape_join(i["ips"])] for i in kept_by_flow_for_report]
-    merged_rows_html = [
+    kept_dns_rows_excel = [[i["name"], "\n".join(i["ips"])] for i in kept_by_dns_for_report]
+    kept_flow_rows_excel = [[i["name"], "\n".join(i["ips"])] for i in kept_by_flow_for_report]
+    merged_rows_excel = [
         [
-            html.escape(i["target"]),
-            html.escape(i["bridge_fqdn"]),
-            html_escape_join(sorted(filter(None, i["sources"].split(";")))),
-            html_escape_join(sorted(filter(None, i["ips"].split(";")))),
+            i["target"],
+            i["bridge_fqdn"],
+            "\n".join(sorted(filter(None, i["sources"].split(";")))),
+            "\n".join(sorted(filter(None, i["ips"].split(";")))),
         ]
         for i in merged_for_report
     ]
+
+    summary_rows_html = [
+        ["Tab 1", "New FQDN IPList(s) created", "DNA IPLists created during this run.", str(len(created_rows_excel))],
+        ["Tab 2", "Existing FQDN IPList(s) updated", "Existing DNA IPLists updated with latest FQDN/IP resolution.", str(len(updated_rows_excel))],
+        ["Tab 3", "FQDN IPList(s) candidate(s) for deletion", "IPLists not seen since the stale threshold and potential cleanup candidates.", str(len(stale_rows_excel))],
+        ["Tab 4", "IP(s) kept because still resolved by DNS", "IPs preserved because at least one managed FQDN still resolves to them.", str(len(kept_dns_rows_excel))],
+        ["Tab 5", "IP(s) kept because still present in destination flows", "IPs preserved because they were observed in destination traffic flows.", str(len(kept_flow_rows_excel))],
+        ["Tab 6", "IPList regrouping by identical IP set", "Regrouping actions where multiple source groups shared the same exact IP set.", str(len(merged_rows_excel))],
+    ]
+
+    summary_rows_excel = [
+        ["Job Start at", steps[0].started_at if steps else ""],
+        ["Job End at", steps[-1].ended_at if steps else ""],
+        ["", ""],
+        ["tab", "tab title", "Description", "Number of impacted element"],
+        *summary_rows_html,
+    ]
+
+    excel_path = run_dir / f"dna-automanaged-iplists-{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
+    build_excel(
+        [
+            {
+                "name": "Summary",
+                "headers": ["Item", "Value", "", ""],
+                "rows": summary_rows_excel,
+                "wrap_cols": {1, 2},
+                "header_row_indices": {5},
+            },
+            {
+                "name": "New FQDN IPLists",
+                "headers": ["IPList name", "fqdns", "IP Addresses"],
+                "rows": created_rows_excel,
+                "wrap_cols": {1, 2},
+            },
+            {
+                "name": "Updated FQDN IPLists",
+                "headers": ["IPList name", "fqdns", "IP Addresses"],
+                "rows": updated_rows_excel,
+                "wrap_cols": {1, 2},
+            },
+            {
+                "name": "Deletion Candidates",
+                "headers": ["IPList name", "fqdns", "IP Addresses", "Last seen at"],
+                "rows": stale_rows_excel,
+                "wrap_cols": {1, 2},
+            },
+            {
+                "name": "Kept by DNS",
+                "headers": ["IPList name", "IP Addresses"],
+                "rows": kept_dns_rows_excel,
+                "wrap_cols": {1},
+            },
+            {
+                "name": "Kept by Flows",
+                "headers": ["IPList name", "IP Addresses"],
+                "rows": kept_flow_rows_excel,
+                "wrap_cols": {1},
+            },
+            {
+                "name": "Regroup by IP Set",
+                "headers": ["Target IPList", "Bridge FQDN", "Merged source groups", "Shared IPs"],
+                "rows": merged_rows_excel,
+                "wrap_cols": {1, 2, 3},
+            },
+        ],
+        excel_path,
+    )
 
     script_name = Path(__file__).name
     vm_hostname = socket.gethostname()
@@ -1030,66 +1113,17 @@ def main() -> int:
     body_html = (
         "<div style='font-family:Arial,sans-serif'>"
         + build_table_html(
-            "Table 1 : New FQDN IPList(s) created",
-            ["IPList name", "fqdns", "IP Adresses"],
-            created_rows_html,
-        )
-        + "<br/>"
-        + build_table_html(
-            "Table 2 : Existing FQDN IPList(s) updated",
-            ["IPList name", "fqdns", "IP Adresses"],
-            updated_rows_html,
-        )
-        + "<br/>"
-        + build_table_html(
-            "Table 3 : FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks)",
-            ["IPList name", "fqdns", "IP Adresses", "Last seen at"],
-            stale_rows_html,
-        )
-        + "<br/>"
-        + build_table_html(
-            "Table 4 : IP(s) kept because still resolved by DNS",
-            ["IPList name", "IP Adresses"],
-            kept_dns_rows_html,
-        )
-        + "<br/>"
-        + build_table_html(
-            "Table 5 : IP(s) kept because still present in destination flows",
-            ["IPList name", "IP Adresses"],
-            kept_flow_rows_html,
-        )
-        + "<br/>"
-        + build_table_html(
-            "Table 6 : IPList regrouping by identical IP set",
-            ["Target IPList", "Bridge FQDN", "Merged source groups", "Shared IPs"],
-            merged_rows_html,
+            "Summary",
+            ["tab", "tab title", "Description", "Number of impacted element"],
+            [[html.escape(c) for c in row] for row in summary_rows_html],
         )
         + f"<br/><p style='font-family:Arial,sans-serif'><strong>Sent by FQDN IPList Batch<br/>{html.escape(script_name)} / running from {html.escape(vm_hostname)}</strong></p>"
         + "</div>"
     )
 
     body_text_lines = [
-        "New FQDN IPList(s) created:",
-        *(f"- {i['name']} | fqdns={';'.join(i['fqdns'])} | ips={';'.join(i['ips'])}" for i in created_for_report),
-        "",
-        "Existing FQDN IPList(s) updated:",
-        *(
-            f"- {i['name']} | fqdns +( {','.join(sorted(set(i['new_fqdns'])-set(i['old_fqdns'])))} ) -( {','.join(sorted(set(i['old_fqdns'])-set(i['new_fqdns'])))} )"
-            f" | ips +( {','.join(sorted(set(i['new_ips'])-set(i['old_ips'])))} ) -( {','.join(sorted(set(i['old_ips'])-set(i['new_ips'])))} )"
-            for i in updated_for_report
-        ),
-        "",
-        "FQDN IPList(s) candidate(s) for deletion (not seen since 3 weeks):",
-        *(f"- {i['name']} | {i['fqdns']} | {i['include']} | {i['last_seen']}" for i in stale),
-        "",
-        "IP(s) kept because still resolved by DNS:",
-        *(f"- {i['name']} | ips={';'.join(i['ips'])}" for i in kept_by_dns_for_report),
-        "",
-        "IP(s) kept because still present in destination flows:",
-        *(f"- {i['name']} | ips={';'.join(i['ips'])}" for i in kept_by_flow_for_report),
-        "",
-        "IPList regrouping by identical IP set:",
-        *(f"- target={i['target']} | bridge_fqdn={i['bridge_fqdn']} | sources={i['sources']} | ips={i['ips']}" for i in merged_for_report),
+        "Summary:",
+        *(f"- {row[0]} | {row[1]} | impacted={row[3]} | {row[2]}" for row in summary_rows_html),
         "",
         "Sent by FQDN IPList Batch",
         f"{script_name} / running from {vm_hostname}",
