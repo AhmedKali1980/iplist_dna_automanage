@@ -8,6 +8,7 @@ creates/updates only DNA_* IPLists, and sends an execution report by email.
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import datetime as dt
 import html
@@ -16,7 +17,9 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tarfile
+import traceback
 import xml.sax.saxutils as saxutils
 import zipfile
 from collections import defaultdict
@@ -585,12 +588,46 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     execution_log = run_dir / "execution.log"
+    report_log = run_dir / "execution_report.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(execution_log, encoding="utf-8"), logging.StreamHandler()],
     )
     logger = logging.getLogger("dna_automanage")
+    fatal_errors: List[str] = []
+    report_written = {"done": False}
+    steps: List[StepResult] = []
+
+    def write_execution_report() -> None:
+        if report_written["done"]:
+            return
+        report_written["done"] = True
+
+        with report_log.open("w", encoding="utf-8") as f:
+            f.write("Section 1 - Execution summary\n")
+            for s in steps:
+                f.write(f"- {s.name}: rc={s.rc}; started={s.started_at}; ended={s.ended_at}\n")
+            if fatal_errors:
+                f.write("\nSection 2 - Fatal errors\n")
+                for err in fatal_errors:
+                    f.write(err)
+                    if not err.endswith("\n"):
+                        f.write("\n")
+            f.write("\nSection 3 - Detailed execution log\n")
+            if execution_log.exists():
+                f.write(execution_log.read_text(encoding="utf-8"))
+
+    old_excepthook = sys.excepthook
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        trace = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        fatal_errors.append(trace)
+        logger.error("Unhandled exception in dna_automanage:\n%s", trace)
+        old_excepthook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _excepthook
+    atexit.register(write_execution_report)
 
     if use_stub_data:
         logger.info("Stub mode enabled (USE_STUB_DATA=true). Reading fixtures from %s", stub_root)
@@ -598,7 +635,6 @@ def main() -> int:
             logger.error("Stub data directory not found: %s", stub_root)
             return 1
 
-    steps: List[StepResult] = []
     bin_dir = root / "bin"
 
     export_ipl = run_dir / "export_iplists.csv"
@@ -1004,14 +1040,7 @@ def main() -> int:
         if d and (now.date() - d).days > stale_threshold:
             stale.append({"name": v["name"], "fqdns": v["fqdns"], "include": v["include"], "last_seen": d.isoformat(), "href": v["href"]})
 
-    report_log = run_dir / "execution_report.log"
-    with report_log.open("w", encoding="utf-8") as f:
-        f.write("Section 1 - Execution summary\n")
-        for s in steps:
-            f.write(f"- {s.name}: rc={s.rc}; started={s.started_at}; ended={s.ended_at}\n")
-        f.write("\nSection 2 - Detailed execution log\n")
-        if execution_log.exists():
-            f.write(execution_log.read_text(encoding="utf-8"))
+    write_execution_report()
 
     created_rows_excel = [[i["name"], "\n".join(i["fqdns"]), "\n".join(i["ips"])] for i in created_for_report]
     updated_rows_excel = [
