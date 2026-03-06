@@ -432,8 +432,11 @@ def build_excel_sheet(headers: List[str], rows: List[List[str]], wrap_cols: Set[
 
     data_header_rows = header_row_indices or set()
     for row_idx, values in enumerate(rows, start=2):
-        normalized = [v if v is not None else "" for v in values]
+        normalized = ["" if v is None else (v if isinstance(v, str) else str(v)) for v in values]
         for i, v in enumerate(normalized):
+            if i >= len(max_chars):
+                max_chars.append(len(v or ""))
+                continue
             max_chars[i] = max(max_chars[i], len(v or ""))
         row_style = 1 if row_idx in data_header_rows else None
         cells = "".join(
@@ -1050,8 +1053,8 @@ def main() -> int:
     ]
 
     summary_rows_excel = [
-        ["Job Start at", steps[0].started_at if steps else ""],
-        ["Job End at", steps[-1].ended_at if steps else ""],
+        ["Job Start at", steps[0].started_at.isoformat(sep=" ", timespec="seconds") if steps else ""],
+        ["Job End at", steps[-1].ended_at.isoformat(sep=" ", timespec="seconds") if steps else ""],
         ["", ""],
         ["tab", "tab title", "Description", "Number of impacted element"],
         *summary_rows_html,
