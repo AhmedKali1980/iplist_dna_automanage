@@ -401,6 +401,27 @@ def find_ips_in_multiple_dna_iplists(state: Dict[str, Dict[str, str]]) -> List[D
     return duplicates
 
 
+
+
+def enforce_unique_desired_ip_ownership(desired_by_iplist: Dict[str, Dict[str, Set[str]]]) -> Dict[str, str]:
+    """Ensure each IP is owned by a single desired target IPList.
+
+    Ownership is deterministic: alphabetically first target keeps the IP.
+    Non-owner targets have the duplicated IP removed from their desired include set.
+    """
+
+    ip_owner: Dict[str, str] = {}
+    for iplist_name in sorted(desired_by_iplist.keys()):
+        owned_ips: Set[str] = set()
+        for ip in sorted(desired_by_iplist[iplist_name].get("ips", set())):
+            if ip in ip_owner:
+                continue
+            ip_owner[ip] = iplist_name
+            owned_ips.add(ip)
+        desired_by_iplist[iplist_name]["ips"] = owned_ips
+    return ip_owner
+
+
 def collect_flow_ips(rows: List[Dict[str, str]]) -> Set[str]:
     ips: Set[str] = set()
     for row in rows:
@@ -895,18 +916,15 @@ def main() -> int:
     desired_by_iplist, regroup_events = regroup_by_exact_ips_with_bridge_fqdn(desired_by_group_key, az_tokens)
     reassigned_ips = regroup_events
 
-    desired_ip_owners: Dict[str, Set[str]] = defaultdict(set)
-    for name, payload in desired_by_iplist.items():
-        for ip in payload.get("ips", set()):
-            desired_ip_owners[ip].add(name)
+    desired_ip_owner = enforce_unique_desired_ip_ownership(desired_by_iplist)
 
     for iplist_name, old in existing.items():
         if iplist_name in desired_by_iplist:
             continue
-        shared_ips = sorted(ip for ip in parse_semicolon_set(old["include"]) if ip in desired_ip_owners)
+        shared_ips = sorted(ip for ip in parse_semicolon_set(old["include"]) if ip in desired_ip_owner)
         if not shared_ips:
             continue
-        keep_targets = sorted({target for ip in shared_ips for target in desired_ip_owners[ip]})
+        keep_targets = sorted({desired_ip_owner[ip] for ip in shared_ips})
         redundant_iplists_for_manual_deletion.append(
             {
                 "iplist_name": iplist_name,
@@ -1012,6 +1030,8 @@ def main() -> int:
     reassigned_for_report.extend(reassigned_ips)
     merged_for_report.extend(regroup_events)
 
+    retained_ip_owner: Dict[str, str] = dict(desired_ip_owner)
+
     for iplist_name, desired in sorted(desired_by_iplist.items()):
         desired_ips = set(desired["ips"])
         if not desired_ips:
@@ -1029,14 +1049,20 @@ def main() -> int:
             kept_flow = set()
 
             for ip in sorted(old_ips - desired_ips):
+                owner = retained_ip_owner.get(ip)
+                if owner and owner != iplist_name:
+                    continue
+
                 fqdn_matches = [fqdn for fqdn in merged_fqdns if ip in resolve_fqdn_ips(fqdn, logger)]
                 if fqdn_matches:
                     desired_ips.add(ip)
                     kept_dns.add(ip)
+                    retained_ip_owner[ip] = iplist_name
                     continue
                 if ip in flow_seen_ips_in_candidates:
                     desired_ips.add(ip)
                     kept_flow.add(ip)
+                    retained_ip_owner[ip] = iplist_name
 
             include = ";".join(sorted(desired_ips))
             update_rows.append(

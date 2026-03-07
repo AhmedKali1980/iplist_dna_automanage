@@ -3,6 +3,7 @@ import unittest
 from modules.dna_automanage import (
     drop_rows_without_destination_fqdn,
     filter_flow_rows,
+    enforce_unique_desired_ip_ownership,
     find_ips_in_multiple_dna_iplists,
     group_key_for_fqdn,
     regroup_by_exact_ips_with_bridge_fqdn,
@@ -132,6 +133,20 @@ class TestNullSafeCsvFallbacks(unittest.TestCase):
         filtered = filter_flow_rows(rows)
 
         self.assertEqual(filtered, [])
+
+
+class TestUniqueOwnershipGuard(unittest.TestCase):
+    def test_enforce_unique_desired_ip_ownership_keeps_single_owner(self):
+        desired = {
+            "DNA_b-IPL": {"ips": {"192.0.2.10", "192.0.2.11"}, "fqdns": {"b.example"}},
+            "DNA_a-IPL": {"ips": {"192.0.2.10"}, "fqdns": {"a.example"}},
+        }
+
+        owner = enforce_unique_desired_ip_ownership(desired)
+
+        self.assertEqual(owner["192.0.2.10"], "DNA_a-IPL")
+        self.assertEqual(desired["DNA_a-IPL"]["ips"], {"192.0.2.10"})
+        self.assertEqual(desired["DNA_b-IPL"]["ips"], {"192.0.2.11"})
 
 
 class TestDuplicateIpsReport(unittest.TestCase):
